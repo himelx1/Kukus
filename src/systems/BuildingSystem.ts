@@ -1,0 +1,770 @@
+import { BUILDING_LIST, BUILDINGS } from '../data/buildings.data';
+import { getBuildQueueCap } from '../data/levels.data';
+import { RESOURCES, ResourceId } from '../data/resources.data';
+import { ROADS, RoadType } from '../data/roads.data';
+import { TECH_MAP } from '../data/techTree.data';
+import { DEPOSIT_NAMES, DepositType, FeatureType } from '../data/trees.data';
+import type { ChunkManager } from '../core/ChunkManager';
+import type { BuildingInstance, WorldEngineState } from '../core/GameState';
+import { gridToChunk } from '../core/IsoMath';
+import { ResourceSystem } from './ResourceSystem';
+import type { RoadNetworkSystem } from './RoadNetworkSystem';
+
+export interface MaterialShortage {
+  resourceId: ResourceId;
+  name: string;
+  have: number;
+  need: number;
+  missing: number;
+  producers: string[];
+}
+
+export interface GlobalBuildRequirements {
+  unlocked: boolean;
+  readyToPlace: boolean;
+  levelOk: boolean;
+  techOk: boolean;
+  missingTechName?: string;
+  queueActive: number;
+  queueCap: number;
+  queueFull: boolean;
+  coinsHave: number;
+  coinsNeed: number;
+  missingCoins: number;
+  materials: MaterialShortage[];
+  missingMaterials: MaterialShortage[];
+  requiredDeposit?: DepositType;
+  requiredDepositName?: string;
+  requiresCoast: boolean;
+  requiresRoad: boolean;
+  minRoadTierName?: string;
+  summaryReason?: string;
+}
+
+export interface PlacementValidation {
+  valid: boolean;
+  reason?: string;
+  missingCoins?: number;
+  missingMaterials?: MaterialShortage[];
+  queueFull?: boolean;
+  blockingObstacleTiles?: Array<{ gx: number; gy: number }>;
+  requiresDeposit?: DepositType;
+  requiresCoast?: boolean;
+}
+
+const NATURAL_SOURCES: Partial<Record<ResourceId, string[]>> = {
+  wood: ['Chop Trees', 'Woodcutter Camp', 'Forester Hut'],
+  stone: ['Chop Stone Boulders', 'Stone Quarry'],
+  herbs: ['Chop Jungle Trees', 'Gatherer Hut', 'Spice Garden'],
+  berries: ['Chop Fruit Trees', 'Gatherer Hut'],
+  bamboo: ['Chop Wild Bamboo', 'Bamboo Grove'],
+  clay: ['Clay Pit (on Clay Bed)'],
+  sand: ['Sand Quarry (on Sand Bank)'],
+  iron_ore: ['Iron Mine (on Iron Vein)'],
+  copper_ore: ['Copper Mine (on Copper Vein)'],
+  coal: ['Coal Mine (on Coal Deposit)'],
+  gold_ore: ['Gold Mine (on Gold Vein)'],
+};
+
+export class BuildingSystem {
+  private static producerCache: Partial<Record<ResourceId, string[]>> | null = null;
+
+  public static getResourceProducers(resourceId: ResourceId): string[] {
+    if (!this.producerCache) {
+      this.producerCache = {};
+      for (const b of BUILDING_LIST) {
+        if (!b.recipe?.outputs) continue;
+        for (const outId of Object.keys(b.recipe.outputs) as ResourceId[]) {
+          const list = (this.producerCache[outId] ??= []);
+          if (!list.includes(b.name)) list.push(b.name);
+        }
+      }
+    }
+    const base = NATURAL_SOURCES[resourceId] ?? [];
+    const crafted = this.producerCache[resourceId] ?? [];
+    return Array.from(new Set([...base, ...crafted]));
+  }
+
+  public static getResourceConsumers(resourceId: ResourceId): string[] {
+    const usedBy: string[] = [];
+    for (const b of BUILDING_LIST) {
+      if (b.materialCost[resourceId] || b.recipe?.inputs?.[resourceId]) {
+        usedBy.push(b.name);
+      }
+    }
+    return usedBy.slice(0, 6);
+  }
+
+  public static getGlobalBuildRequirements(
+    defId: string,
+    state: WorldEngineState
+  ): GlobalBuildRequirements {
+    const def = BUILDINGS[defId];
+    if (!def) {
+      return {
+        unlocked: false,
+        readyToPlace: false,
+        levelOk: false,
+        techOk: false,
+        queueActive: 0,
+        queueCap: 2,
+        queueFull: false,
+        coinsHave: Math.floor(state.coins),
+        coinsNeed: 0,
+        missingCoins: 0,
+        materials: [],
+        missingMaterials: [],
+        requiresCoast: false,
+        requiresRoad: false,
+        summaryReason: 'Unknown building',
+      };
+    }
+
+    const levelOk = state.level >= def.unlockLevel;
+    const techOk = !def.requiredTech || state.unlockedTechIds.includes(def.requiredTech);
+    const missingTechName = def.requiredTech
+      ? TECH_MAP[def.requiredTech]?.name ?? def.requiredTech
+      : undefined;
+
+    const queueActive = state.buildings.filter((b) => b.status === 'constructing').length;
+    const queueCap = getBuildQueueCap(state.level);
+    const queueFull = queueActive >= queueCap;
+
+    const coinsHave = Math.floor(state.coins);
+    const coinsNeed = def.coinCost;
+    const missingCoins = Math.max(0, coinsNeed - coinsHave);
+
+    const materials: MaterialShortage[] = [];
+    for (const [k, rawNeed] of Object.entries(def.materialCost)) {
+      const need = rawNeed ?? 0;
+      if (need <= 0) continue;
+      const rid = k as ResourceId;
+      const have = Math.floor(state.resources[rid] ?? 0);
+      materials.push({
+        resourceId: rid,
+        name: RESOURCES[rid]?.name ?? rid,
+        have,
+        need,
+        missing: Math.max(0, need - have),
+        producers: this.getResourceProducers(rid),
+      });
+    }
+    const missingMaterials = materials.filter((m) => m.missing > 0);
+    const requiredDepositName = def.requiredDeposit
+      ? DEPOSIT_NAMES[def.requiredDeposit]
+      : undefined;
+    const minRoadTierName = def.minRoadTier ? ROADS[def.minRoadTier as RoadType]?.name : undefined;
+
+    let summaryReason: string | undefined;
+    if (!levelOk) {
+      summaryReason = `Unlocks at City Level ${def.unlockLevel}`;
+    } else if (!techOk) {
+      summaryReason = `Research "${missingTechName}" in Tech first`;
+    } else if (queueFull) {
+      summaryReason = `Build Queue Full (${queueActive}/${queueCap}) — wait or Rush a build`;
+    } else if (missingCoins > 0 || missingMaterials.length > 0) {
+      const parts: string[] = [];
+      if (missingCoins > 0) parts.push(`${missingCoins} more Coins`);
+      for (const m of missingMaterials) {
+        parts.push(`${m.missing} ${m.name} (${m.have}/${m.need})`);
+      }
+      summaryReason = `Need ${parts.join(', ')}`;
+    } else if (requiredDepositName) {
+      summaryReason = `Place over a ${requiredDepositName} tile`;
+    } else if (def.requiresCoast) {
+      summaryReason = 'Place touching a River or Ocean tile';
+    }
+
+    return {
+      unlocked: levelOk && techOk,
+      readyToPlace:
+        levelOk && techOk && !queueFull && missingCoins === 0 && missingMaterials.length === 0,
+      levelOk,
+      techOk,
+      missingTechName,
+      queueActive,
+      queueCap,
+      queueFull,
+      coinsHave,
+      coinsNeed,
+      missingCoins,
+      materials,
+      missingMaterials,
+      requiredDeposit: def.requiredDeposit,
+      requiredDepositName,
+      requiresCoast: Boolean(def.requiresCoast),
+      requiresRoad: def.requiresRoad,
+      minRoadTierName,
+      summaryReason,
+    };
+  }
+
+  public static getUpgradeCostAndMissing(
+    b: BuildingInstance,
+    state: WorldEngineState
+  ): {
+    coinCost: number;
+    missingCoins: number;
+    materials: MaterialShortage[];
+    missingMaterials: MaterialShortage[];
+    canAfford: boolean;
+  } {
+    const def = BUILDINGS[b.defId];
+    if (!def) {
+      return { coinCost: 0, missingCoins: 0, materials: [], missingMaterials: [], canAfford: false };
+    }
+    const mult = 0.75 * Math.pow(1.6, b.level - 1);
+    const coinCost = Math.round(def.coinCost * mult);
+    const missingCoins = Math.max(0, coinCost - Math.floor(state.coins));
+    const materials: MaterialShortage[] = [];
+    for (const [k, v] of Object.entries(def.materialCost)) {
+      if (!v) continue;
+      const need = Math.max(1, Math.round(v * mult));
+      const rid = k as ResourceId;
+      const have = Math.floor(state.resources[rid] ?? 0);
+      materials.push({
+        resourceId: rid,
+        name: RESOURCES[rid]?.name ?? rid,
+        have,
+        need,
+        missing: Math.max(0, need - have),
+        producers: this.getResourceProducers(rid),
+      });
+    }
+    const missingMaterials = materials.filter((m) => m.missing > 0);
+    return {
+      coinCost,
+      missingCoins,
+      materials,
+      missingMaterials,
+      canAfford: missingCoins === 0 && missingMaterials.length === 0,
+    };
+  }
+
+  public validateBuildingPlacement(
+    defId: string,
+    gx: number,
+    gy: number,
+    state: WorldEngineState,
+    chunks: ChunkManager
+  ): PlacementValidation {
+    const def = BUILDINGS[defId];
+    if (!def) return { valid: false, reason: 'Unknown building' };
+
+    const req = BuildingSystem.getGlobalBuildRequirements(defId, state);
+    if (!req.levelOk) {
+      return { valid: false, reason: `Requires City Level ${def.unlockLevel} (currently Lv.${state.level})` };
+    }
+    if (!req.techOk) {
+      return { valid: false, reason: `Research "${req.missingTechName}" in Tech first` };
+    }
+    if (req.queueFull) {
+      return {
+        valid: false,
+        queueFull: true,
+        reason: `Construction queue full (${req.queueActive}/${req.queueCap}) — wait or tap an active site to Rush`,
+      };
+    }
+
+    // Tile / footprint checks first alongside cost check so player gets full clarity
+    let hasDeposit = false;
+    let touchesWater = false;
+    const blockingObstacles: Array<{ gx: number; gy: number }> = [];
+
+    for (let dx = 0; dx < def.width; dx++) {
+      for (let dy = 0; dy < def.height; dy++) {
+        const tx = gx + dx;
+        const ty = gy + dy;
+        if (!chunks.isUnlocked(tx, ty)) {
+          return {
+            valid: false,
+            missingCoins: req.missingCoins,
+            missingMaterials: req.missingMaterials,
+            reason: `Tile (${tx}, ${ty}) is locked wilderness — unlock frontier land first`,
+          };
+        }
+        const { chunk, index } = chunks.getTile(tx, ty);
+        const biome = chunk.biomeId[index];
+        if (chunks.isWaterBiome(biome)) {
+          return {
+            valid: false,
+            missingCoins: req.missingCoins,
+            missingMaterials: req.missingMaterials,
+            reason: 'Cannot place foundation directly on River or Deep Water',
+          };
+        }
+        if (chunk.buildingRef[index] !== -1) {
+          return {
+            valid: false,
+            missingCoins: req.missingCoins,
+            missingMaterials: req.missingMaterials,
+            reason: `Footprint (${tx}, ${ty}) overlaps another building — move or remove it first`,
+          };
+        }
+        if (chunk.roadType[index] !== RoadType.None) {
+          return {
+            valid: false,
+            missingCoins: req.missingCoins,
+            missingMaterials: req.missingMaterials,
+            reason: `Footprint (${tx}, ${ty}) has a road — remove road or choose adjacent plot`,
+          };
+        }
+        if (chunk.featureType[index] !== FeatureType.None) {
+          blockingObstacles.push({ gx: tx, gy: ty });
+        }
+        if (def.requiredDeposit && chunk.depositType[index] === def.requiredDeposit) {
+          hasDeposit = true;
+        }
+      }
+    }
+
+    if (blockingObstacles.length > 0) {
+      return {
+        valid: false,
+        blockingObstacleTiles: blockingObstacles,
+        missingCoins: req.missingCoins,
+        missingMaterials: req.missingMaterials,
+        reason: `${blockingObstacles.length} tree${blockingObstacles.length > 1 ? 's/boulders' : '/boulder'} blocking plot — tap "Clear Trees" or chop first`,
+      };
+    }
+
+    if (def.requiredDeposit && !hasDeposit) {
+      return {
+        valid: false,
+        requiresDeposit: def.requiredDeposit,
+        missingCoins: req.missingCoins,
+        missingMaterials: req.missingMaterials,
+        reason: `No ${req.requiredDepositName ?? 'mineral deposit'} under footprint — place over a sparkling vein`,
+      };
+    }
+
+    if (def.requiresCoast) {
+      outer: for (let dx = -1; dx <= def.width; dx++) {
+        for (let dy = -1; dy <= def.height; dy++) {
+          if (dx >= 0 && dx < def.width && dy >= 0 && dy < def.height) continue;
+          const { chunk, index } = chunks.getTile(gx + dx, gy + dy);
+          if (chunks.isWaterBiome(chunk.biomeId[index])) {
+            touchesWater = true;
+            break outer;
+          }
+        }
+      }
+      if (!touchesWater) {
+        return {
+          valid: false,
+          requiresCoast: true,
+          missingCoins: req.missingCoins,
+          missingMaterials: req.missingMaterials,
+          reason: 'Must sit directly beside a River or Ocean water tile',
+        };
+      }
+    }
+
+    if (req.missingCoins > 0 || req.missingMaterials.length > 0) {
+      return {
+        valid: false,
+        missingCoins: req.missingCoins,
+        missingMaterials: req.missingMaterials,
+        reason: req.summaryReason,
+      };
+    }
+
+    return { valid: true };
+  }
+
+  public placeBuilding(
+    defId: string,
+    gx: number,
+    gy: number,
+    state: WorldEngineState,
+    chunks: ChunkManager,
+    roadNet: RoadNetworkSystem
+  ): { ok: boolean; reason?: string; building?: BuildingInstance } {
+    const check = this.validateBuildingPlacement(defId, gx, gy, state, chunks);
+    if (!check.valid) return { ok: false, reason: check.reason };
+
+    const def = BUILDINGS[defId];
+    if (!ResourceSystem.consume(state, def.coinCost, def.materialCost)) {
+      const req = BuildingSystem.getGlobalBuildRequirements(defId, state);
+      return { ok: false, reason: req.summaryReason ?? 'Insufficient Coins or materials' };
+    }
+
+    const id = state.nextBuildingId++;
+    const building: BuildingInstance = {
+      id,
+      defId,
+      gx,
+      gy,
+      level: 1,
+      status: 'constructing',
+      buildProgress: 0,
+      prodProgress: 0,
+      assignedWorkers: 0,
+      lockedWorkers: null,
+      enabled: true,
+      connectedRoadCluster: 0,
+    };
+
+    for (let dx = 0; dx < def.width; dx++) {
+      for (let dy = 0; dy < def.height; dy++) {
+        const { cx, cy, index } = gridToChunk(gx + dx, gy + dy);
+        const chunk = chunks.getOrCreateChunk(cx, cy);
+        chunk.buildingRef[index] = id;
+        chunks.markChunkModified(cx, cy);
+      }
+    }
+
+    state.buildings.push(building);
+    roadNet.evaluateBuildingRoadAccess(building, chunks);
+    return { ok: true, building };
+  }
+
+  public getRushCost(b: BuildingInstance): number {
+    const def = BUILDINGS[b.defId];
+    if (!def || b.status !== 'constructing') return 0;
+    const rem = Math.max(0.05, 1 - b.buildProgress);
+    return Math.max(15, Math.round((25 + def.coinCost * 0.14) * rem));
+  }
+
+  public rushConstruction(
+    buildingId: number,
+    state: WorldEngineState
+  ): { ok: boolean; reason?: string; xpGained: number; cost: number; building?: BuildingInstance } {
+    const b = state.buildings.find((item) => item.id === buildingId);
+    if (!b) return { ok: false, reason: 'Building not found', xpGained: 0, cost: 0 };
+    if (b.status !== 'constructing') {
+      return { ok: false, reason: 'Construction already finished', xpGained: 0, cost: 0 };
+    }
+    const def = BUILDINGS[b.defId];
+    if (!def) return { ok: false, reason: 'Unknown building', xpGained: 0, cost: 0 };
+
+    const cost = this.getRushCost(b);
+    if (state.coins < cost) {
+      return { ok: false, reason: `Need ${cost} Coins to Rush completion`, xpGained: 0, cost };
+    }
+
+    state.coins -= cost;
+    b.buildProgress = 1;
+    b.status = b.enabled ? 'active' : 'disabled';
+    state.stats.buildingsBuilt += 1;
+    ResourceSystem.recalculateCapacities(state);
+    return { ok: true, xpGained: def.xpOnBuild, cost, building: b };
+  }
+
+  public placeRoad(
+    roadType: RoadType,
+    gx: number,
+    gy: number,
+    state: WorldEngineState,
+    chunks: ChunkManager,
+    roadNet: RoadNetworkSystem
+  ): { ok: boolean; reason?: string; xpGained: number } {
+    const def = ROADS[roadType];
+    if (!def || roadType === RoadType.None) return { ok: false, reason: 'Invalid road', xpGained: 0 };
+    if (state.level < def.unlockLevel) {
+      return { ok: false, reason: `Requires Level ${def.unlockLevel}`, xpGained: 0 };
+    }
+    if (def.requiredTech && !state.unlockedTechIds.includes(def.requiredTech)) {
+      return {
+        ok: false,
+        reason: `Requires technology: ${TECH_MAP[def.requiredTech]?.name ?? def.requiredTech}`,
+        xpGained: 0,
+      };
+    }
+    if (!chunks.isUnlocked(gx, gy)) {
+      return { ok: false, reason: 'Unlock tile first before placing road', xpGained: 0 };
+    }
+
+    const { cx, cy, index } = gridToChunk(gx, gy);
+    const chunk = chunks.getOrCreateChunk(cx, cy);
+    const isWater = chunks.isWaterBiome(chunk.biomeId[index]);
+    if (isWater && !def.allowedOnWater) {
+      return { ok: false, reason: 'Select Timber Bridge to cross River or Water', xpGained: 0 };
+    }
+    if (!isWater && def.allowedOnWater) {
+      return { ok: false, reason: 'Bridges can only be built over River or Water', xpGained: 0 };
+    }
+    if (chunk.buildingRef[index] !== -1) {
+      return { ok: false, reason: 'Tile has a building', xpGained: 0 };
+    }
+    if (chunk.featureType[index] !== FeatureType.None) {
+      return { ok: false, reason: 'Chop trees or boulders on tile first', xpGained: 0 };
+    }
+    const existingRoad = chunk.roadType[index] as RoadType;
+    if (existingRoad === roadType) {
+      return { ok: false, reason: 'Road already placed here', xpGained: 0 };
+    }
+    if (existingRoad !== RoadType.None && roadType !== RoadType.Rail) {
+      const prevDef = ROADS[existingRoad];
+      if (prevDef && prevDef.speedMultiplier >= def.speedMultiplier) {
+        return { ok: false, reason: 'Select a faster road tier to upgrade', xpGained: 0 };
+      }
+    }
+
+    const prevRefund = existingRoad !== RoadType.None ? Math.round((ROADS[existingRoad]?.coinCost ?? 0) * 0.5) : 0;
+    const netCoinCost = Math.max(0, def.coinCost - prevRefund);
+
+    if (!ResourceSystem.canAfford(state, netCoinCost, def.materialCost)) {
+      const missing: string[] = [];
+      if (state.coins < netCoinCost) {
+        missing.push(`${netCoinCost - Math.floor(state.coins)} Coins`);
+      }
+      for (const [k, v] of Object.entries(def.materialCost)) {
+        if (!v) continue;
+        const have = Math.floor(state.resources[k as ResourceId] ?? 0);
+        if (have < v) missing.push(`${v - have} ${RESOURCES[k as ResourceId]?.name ?? k}`);
+      }
+      return { ok: false, reason: `Need ${missing.join(', ')} for ${def.name}`, xpGained: 0 };
+    }
+
+    ResourceSystem.consume(state, netCoinCost, def.materialCost);
+
+    chunk.roadType[index] = roadType;
+    chunks.markChunkModified(cx, cy);
+    roadNet.markDirty();
+    roadNet.recomputeIfDirty(chunks, state);
+    if (existingRoad === RoadType.None) {
+      state.stats.roadsBuilt += 1;
+    }
+
+    return { ok: true, xpGained: def.xpYield };
+  }
+
+  public upgradeBuilding(
+    buildingId: number,
+    state: WorldEngineState
+  ): { ok: boolean; reason?: string; xpGained: number } {
+    const b = state.buildings.find((item) => item.id === buildingId);
+    if (!b) return { ok: false, reason: 'Building not found', xpGained: 0 };
+    if (b.status === 'constructing') return { ok: false, reason: 'Wait for construction to finish', xpGained: 0 };
+    const def = BUILDINGS[b.defId];
+    if (!def) return { ok: false, reason: 'Invalid definition', xpGained: 0 };
+    if (b.level >= def.maxLevel) return { ok: false, reason: 'Already max level', xpGained: 0 };
+
+    const upg = BuildingSystem.getUpgradeCostAndMissing(b, state);
+    if (!upg.canAfford) {
+      const parts: string[] = [];
+      if (upg.missingCoins > 0) parts.push(`${upg.missingCoins} Coins`);
+      for (const m of upg.missingMaterials) {
+        parts.push(`${m.missing} ${m.name} (${m.have}/${m.need})`);
+      }
+      return { ok: false, reason: `Upgrade needs ${parts.join(', ')}`, xpGained: 0 };
+    }
+
+    const matCost: Partial<Record<string, number>> = {};
+    for (const m of upg.materials) matCost[m.resourceId] = m.need;
+
+    if (!ResourceSystem.consume(state, upg.coinCost, matCost)) {
+      return { ok: false, reason: 'Insufficient Coins or materials', xpGained: 0 };
+    }
+
+    b.level += 1;
+    ResourceSystem.recalculateCapacities(state);
+    return { ok: true, xpGained: 40 * b.level };
+  }
+
+  public validateBuildingMove(
+    buildingId: number,
+    newGx: number,
+    newGy: number,
+    state: WorldEngineState,
+    chunks: ChunkManager
+  ): PlacementValidation {
+    const b = state.buildings.find((item) => item.id === buildingId);
+    if (!b) return { valid: false, reason: 'Building not found' };
+    if (b.gx === newGx && b.gy === newGy) {
+      return { valid: false, reason: 'Already at this location' };
+    }
+    const def = BUILDINGS[b.defId];
+    if (!def) return { valid: false, reason: 'Unknown building' };
+
+    let hasDeposit = false;
+    let touchesWater = false;
+    const blockingObstacles: Array<{ gx: number; gy: number }> = [];
+
+    for (let dx = 0; dx < def.width; dx++) {
+      for (let dy = 0; dy < def.height; dy++) {
+        const tx = newGx + dx;
+        const ty = newGy + dy;
+        if (!chunks.isUnlocked(tx, ty)) {
+          return { valid: false, reason: `Tile (${tx}, ${ty}) must be unlocked first` };
+        }
+        const { chunk, index } = chunks.getTile(tx, ty);
+        const biome = chunk.biomeId[index];
+        if (chunks.isWaterBiome(biome)) {
+          return { valid: false, reason: 'Cannot move onto River or Deep Water' };
+        }
+        if (chunk.buildingRef[index] !== -1 && chunk.buildingRef[index] !== buildingId) {
+          return { valid: false, reason: 'Footprint overlaps another building' };
+        }
+        if (chunk.roadType[index] !== RoadType.None) {
+          return { valid: false, reason: 'Clear road on target plot first' };
+        }
+        if (chunk.featureType[index] !== FeatureType.None) {
+          blockingObstacles.push({ gx: tx, gy: ty });
+        }
+        if (def.requiredDeposit && chunk.depositType[index] === def.requiredDeposit) {
+          hasDeposit = true;
+        }
+      }
+    }
+
+    if (blockingObstacles.length > 0) {
+      return {
+        valid: false,
+        blockingObstacleTiles: blockingObstacles,
+        reason: `${blockingObstacles.length} tree/boulder blocking plot — tap Clear Trees`,
+      };
+    }
+
+    if (def.requiredDeposit && !hasDeposit) {
+      const dName = def.requiredDeposit ? DEPOSIT_NAMES[def.requiredDeposit] : 'mineral deposit';
+      return { valid: false, reason: `Must remain over a ${dName}` };
+    }
+
+    if (def.requiresCoast) {
+      outer: for (let dx = -1; dx <= def.width; dx++) {
+        for (let dy = -1; dy <= def.height; dy++) {
+          if (dx >= 0 && dx < def.width && dy >= 0 && dy < def.height) continue;
+          const { chunk, index } = chunks.getTile(newGx + dx, newGy + dy);
+          if (chunks.isWaterBiome(chunk.biomeId[index])) {
+            touchesWater = true;
+            break outer;
+          }
+        }
+      }
+      if (!touchesWater) {
+        return { valid: false, reason: 'Must border a River or Ocean tile' };
+      }
+    }
+
+    return { valid: true };
+  }
+
+  public moveBuilding(
+    buildingId: number,
+    newGx: number,
+    newGy: number,
+    state: WorldEngineState,
+    chunks: ChunkManager,
+    roadNet: RoadNetworkSystem
+  ): { ok: boolean; reason?: string; building?: BuildingInstance } {
+    const check = this.validateBuildingMove(buildingId, newGx, newGy, state, chunks);
+    if (!check.valid) return { ok: false, reason: check.reason };
+
+    const b = state.buildings.find((item) => item.id === buildingId);
+    if (!b) return { ok: false, reason: 'Building not found' };
+    const def = BUILDINGS[b.defId];
+    if (!def) return { ok: false, reason: 'Invalid definition' };
+
+    for (let dx = 0; dx < def.width; dx++) {
+      for (let dy = 0; dy < def.height; dy++) {
+        const { cx, cy, index } = gridToChunk(b.gx + dx, b.gy + dy);
+        const chunk = chunks.getOrCreateChunk(cx, cy);
+        if (chunk.buildingRef[index] === b.id) {
+          chunk.buildingRef[index] = -1;
+          chunks.markChunkModified(cx, cy);
+        }
+      }
+    }
+
+    b.gx = newGx;
+    b.gy = newGy;
+
+    for (let dx = 0; dx < def.width; dx++) {
+      for (let dy = 0; dy < def.height; dy++) {
+        const { cx, cy, index } = gridToChunk(newGx + dx, newGy + dy);
+        const chunk = chunks.getOrCreateChunk(cx, cy);
+        chunk.buildingRef[index] = b.id;
+        chunks.markChunkModified(cx, cy);
+      }
+    }
+
+    roadNet.markDirty();
+    roadNet.recomputeIfDirty(chunks, state);
+    roadNet.evaluateBuildingRoadAccess(b, chunks);
+    state.stats.buildingsMoved = (state.stats.buildingsMoved ?? 0) + 1;
+    return { ok: true, building: b };
+  }
+
+  public removeRoad(
+    gx: number,
+    gy: number,
+    state: WorldEngineState,
+    chunks: ChunkManager,
+    roadNet: RoadNetworkSystem
+  ): { ok: boolean; reason?: string; refundCoins: number } {
+    if (!chunks.isUnlocked(gx, gy)) {
+      return { ok: false, reason: 'Tile is locked', refundCoins: 0 };
+    }
+    const { cx, cy, index } = gridToChunk(gx, gy);
+    const chunk = chunks.getOrCreateChunk(cx, cy);
+    const existingRoad = chunk.roadType[index] as RoadType;
+    if (existingRoad === RoadType.None) {
+      return { ok: false, reason: 'No road on this tile', refundCoins: 0 };
+    }
+    const prevDef = ROADS[existingRoad];
+    const refundCoins = Math.round((prevDef?.coinCost ?? 0) * 0.5);
+    chunk.roadType[index] = RoadType.None;
+    chunks.markChunkModified(cx, cy);
+    roadNet.markDirty();
+    roadNet.recomputeIfDirty(chunks, state);
+    if (refundCoins > 0) {
+      state.coins += refundCoins;
+    }
+    return { ok: true, refundCoins };
+  }
+
+  public demolishBuilding(
+    buildingId: number,
+    state: WorldEngineState,
+    chunks: ChunkManager
+  ): boolean {
+    const idx = state.buildings.findIndex((item) => item.id === buildingId);
+    if (idx === -1) return false;
+    const b = state.buildings[idx];
+    const def = BUILDINGS[b.defId];
+
+    if (def) {
+      for (let dx = 0; dx < def.width; dx++) {
+        for (let dy = 0; dy < def.height; dy++) {
+          const { cx, cy, index } = gridToChunk(b.gx + dx, b.gy + dy);
+          const chunk = chunks.getOrCreateChunk(cx, cy);
+          if (chunk.buildingRef[index] === b.id) {
+            chunk.buildingRef[index] = -1;
+            chunks.markChunkModified(cx, cy);
+          }
+        }
+      }
+      // 40% coin refund
+      state.coins += Math.round(def.coinCost * 0.4);
+    }
+
+    state.buildings.splice(idx, 1);
+    ResourceSystem.recalculateCapacities(state);
+    return true;
+  }
+
+  public tickConstruction(
+    state: WorldEngineState,
+    buildSpeedMult: number,
+    weatherBuildMult: number,
+    onComplete: (b: BuildingInstance, xp: number) => void
+  ): void {
+    for (const b of state.buildings) {
+      if (b.status !== 'constructing') continue;
+      const def = BUILDINGS[b.defId];
+      if (!def) continue;
+
+      const step = (1 / Math.max(1, def.buildTime)) * buildSpeedMult * weatherBuildMult;
+      b.buildProgress = Math.min(1, b.buildProgress + step);
+      if (b.buildProgress >= 1) {
+        b.buildProgress = 1;
+        b.status = b.enabled ? 'active' : 'disabled';
+        state.stats.buildingsBuilt += 1;
+        ResourceSystem.recalculateCapacities(state);
+        onComplete(b, def.xpOnBuild);
+      }
+    }
+  }
+}

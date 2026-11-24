@@ -1,4 +1,4 @@
-import { DepositType, FeatureType } from '../data/trees.data';
+import { DepositType, FeatureType, TREE_SPECIES } from '../data/trees.data';
 import { BiomeId, ChunkData, TileFlag } from './GameState';
 import { CHUNK_SIZE, chunkKey, chunkToGrid, hashCoords, mulberry32 } from './IsoMath';
 
@@ -56,6 +56,9 @@ export class WorldGenerator {
     const roadType = new Uint8Array(len);
     const buildingRef = new Int32Array(len).fill(-1);
     const pollution = new Uint8Array(len);
+    const utilityNet = new Uint8Array(len);
+    const cityRef = new Uint16Array(len);
+    const zoneType = new Uint8Array(len);
 
     for (let ly = 0; ly < CHUNK_SIZE; ly++) {
       for (let lx = 0; lx < CHUNK_SIZE; lx++) {
@@ -74,10 +77,11 @@ export class WorldGenerator {
         let elev = 2;
 
         if (WorldGenerator.isStartingTile(gx, gy)) {
-          // Owned starting land is flat (elev = 2) with dense jungle trees
+          // Owned starting land is flat (elev = 2) with starter city #1
           b = BiomeId.Jungle;
           elev = 2;
           flags[idx] = TileFlag.Unlocked | TileFlag.Explored;
+          cityRef[idx] = 1;
         } else if (gx >= -1 && gx <= 6 && gy === 5) {
           // Guaranteed nearby river corridor south of starting patch
           b = BiomeId.River;
@@ -108,6 +112,12 @@ export class WorldGenerator {
           elev = 4;
           depositType[idx] = DepositType.Gold;
           depositQty[idx] = 1200;
+        } else if (gx === 9 && gy === -1) {
+          // Guaranteed reachable highland Silver Ore vein
+          b = BiomeId.Mountain;
+          elev = 4;
+          depositType[idx] = DepositType.Silver;
+          depositQty[idx] = 1300;
         } else {
           const isProtectedSpawnBuffer = distFromStart < 6.5;
           if (!isProtectedSpawnBuffer && cont < 0.27) {
@@ -149,40 +159,41 @@ export class WorldGenerator {
           flags[idx] |= TileFlag.Explored;
         }
 
-        // Populate trees: starting tiles AND locked non-water/non-desert tiles are densely filled with forest/jungle!
+        // Populate 9+ distinct tree species across biomes
         if (WorldGenerator.isStartingTile(gx, gy)) {
           const r = rng();
           const ft =
-            r < 0.54
+            r < 0.48
               ? FeatureType.JungleHardwood
-              : r < 0.78
+              : r < 0.7
                 ? FeatureType.TropicalPalm
-                : r < 0.92
+                : r < 0.86
                   ? FeatureType.FruitTree
-                  : FeatureType.BambooCluster;
+                  : r < 0.94
+                    ? FeatureType.BambooCluster
+                    : FeatureType.BirchTree;
           featureType[idx] = ft;
-          featureHp[idx] =
-            ft === FeatureType.JungleHardwood
-              ? 45
-              : ft === FeatureType.TropicalPalm
-                ? 30
-                : ft === FeatureType.BambooCluster
-                  ? 25
-                  : 35;
+          featureHp[idx] = TREE_SPECIES[ft]?.maxHp ?? 35;
         } else if (featureType[idx] === FeatureType.None) {
           const r = rng();
           if (b === BiomeId.DeepWater || b === BiomeId.River) {
             // No trees on open water
           } else if (b === BiomeId.Mountain) {
-            if (r < 0.42) {
+            if (r < 0.38) {
               featureType[idx] = FeatureType.StoneOutcrop;
               featureHp[idx] = 60;
+            } else if (r < 0.78) {
+              featureType[idx] = FeatureType.PineTree;
+              featureHp[idx] = TREE_SPECIES[FeatureType.PineTree].maxHp;
             } else if (r < 0.92) {
-              featureType[idx] = FeatureType.JungleHardwood;
-              featureHp[idx] = 45;
+              featureType[idx] = FeatureType.OakTree;
+              featureHp[idx] = TREE_SPECIES[FeatureType.OakTree].maxHp;
             }
           } else if (b === BiomeId.Desert) {
-            if (r < 0.25) {
+            if (r < 0.16) {
+              featureType[idx] = FeatureType.AcaciaTree;
+              featureHp[idx] = TREE_SPECIES[FeatureType.AcaciaTree].maxHp;
+            } else if (r < 0.25) {
               featureType[idx] = FeatureType.TropicalPalm;
               featureHp[idx] = 30;
             }
@@ -191,53 +202,72 @@ export class WorldGenerator {
               featureType[idx] = FeatureType.TropicalPalm;
               featureHp[idx] = 30;
             }
-          } else {
-            // Rare Ancient Ruins out in the wilderness (~1.5% of non-water tiles past spawn)
+          } else if (b === BiomeId.Swamp) {
+            if (r < 0.72) {
+              featureType[idx] = FeatureType.CypressTree;
+              featureHp[idx] = TREE_SPECIES[FeatureType.CypressTree].maxHp;
+            } else if (r < 0.9) {
+              featureType[idx] = FeatureType.BambooCluster;
+              featureHp[idx] = 25;
+            }
+          } else if (b === BiomeId.Forest) {
             if (distFromStart > 5.5 && r < 0.015) {
               featureType[idx] = FeatureType.AncientRuin;
               featureHp[idx] = 50;
-            } else if (r < 0.95) {
-              // Locked land is lush, dense forest/jungle (~95% tree coverage)
+            } else if (r < 0.92) {
               const ft =
-                r < 0.42
-                  ? FeatureType.JungleHardwood
-                  : r < 0.64
-                    ? FeatureType.FruitTree
+                r < 0.3
+                  ? FeatureType.OakTree
+                  : r < 0.56
+                    ? FeatureType.BirchTree
                     : r < 0.76
-                      ? FeatureType.TropicalPalm
-                      : r < 0.86
-                        ? FeatureType.BambooCluster
+                      ? FeatureType.PineTree
+                      : r < 0.88
+                        ? FeatureType.FruitTree
                         : FeatureType.AncientMahogany;
               featureType[idx] = ft;
-              featureHp[idx] =
-                ft === FeatureType.AncientMahogany
-                  ? 90
-                  : ft === FeatureType.JungleHardwood
-                    ? 45
-                    : ft === FeatureType.TropicalPalm
-                      ? 30
-                      : ft === FeatureType.BambooCluster
-                        ? 25
-                        : 35;
+              featureHp[idx] = TREE_SPECIES[ft]?.maxHp ?? 40;
+            }
+          } else {
+            if (distFromStart > 5.5 && r < 0.015) {
+              featureType[idx] = FeatureType.AncientRuin;
+              featureHp[idx] = 50;
+            } else if (r < 0.94) {
+              const ft =
+                r < 0.36
+                  ? FeatureType.JungleHardwood
+                  : r < 0.56
+                    ? FeatureType.FruitTree
+                    : r < 0.7
+                      ? FeatureType.TropicalPalm
+                      : r < 0.82
+                        ? FeatureType.BambooCluster
+                        : r < 0.9
+                          ? FeatureType.OakTree
+                          : FeatureType.AncientMahogany;
+              featureType[idx] = ft;
+              featureHp[idx] = TREE_SPECIES[ft]?.maxHp ?? 40;
             }
           }
         }
 
-        // Populate mineral deposits
+        // Populate finite mineral deposits (including Silver)
         if (depositType[idx] === DepositType.None) {
           const dNoise = this.fbm(gx - 77, gy + 88, 12, 313);
           const dr = rng();
           if (b === BiomeId.Mountain) {
-            if (dNoise > 0.62 && dr < 0.48) {
+            if (dNoise > 0.6 && dr < 0.52) {
               depositType[idx] =
-                dr < 0.16
+                dr < 0.14
                   ? DepositType.IronOre
-                  : dr < 0.28
+                  : dr < 0.25
                     ? DepositType.Coal
-                    : dr < 0.4
+                    : dr < 0.35
                       ? DepositType.CopperOre
-                      : DepositType.Gold;
-              depositQty[idx] = 1500;
+                      : dr < 0.44
+                        ? DepositType.Silver
+                        : DepositType.Gold;
+              depositQty[idx] = depositType[idx] === DepositType.Coal ? 1600 : 1400;
             } else if (dr < 0.3) {
               depositType[idx] = DepositType.Stone;
               depositQty[idx] = 1200;
@@ -248,9 +278,9 @@ export class WorldGenerator {
           } else if ((b === BiomeId.Beach || b === BiomeId.Desert) && dr < 0.32) {
             depositType[idx] = DepositType.Sand;
             depositQty[idx] = 1000;
-          } else if ((b === BiomeId.Grassland || b === BiomeId.Forest) && dNoise > 0.68 && dr < 0.15) {
-            depositType[idx] = DepositType.Stone;
-            depositQty[idx] = 800;
+          } else if ((b === BiomeId.Grassland || b === BiomeId.Forest) && dNoise > 0.68 && dr < 0.18) {
+            depositType[idx] = dr < 0.04 ? DepositType.Silver : DepositType.Stone;
+            depositQty[idx] = depositType[idx] === DepositType.Silver ? 1100 : 800;
           }
         }
       }
@@ -273,6 +303,9 @@ export class WorldGenerator {
       roadType,
       buildingRef,
       pollution,
+      utilityNet,
+      cityRef,
+      zoneType,
     };
   }
 }

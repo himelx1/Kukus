@@ -1,4 +1,4 @@
-import { BUILDINGS } from '../data/buildings.data';
+import { BUILDINGS, getBuildingFootprint } from '../data/buildings.data';
 import { RESOURCE_LIST, ResourceId } from '../data/resources.data';
 import type { ChunkManager } from '../core/ChunkManager';
 import { BiomeId, WorldEngineState } from '../core/GameState';
@@ -9,6 +9,7 @@ import type { TechModifiers } from './TechSystem';
 import type { WorkforceSystem } from './WorkforceSystem';
 
 import type { BuildingInstance } from '../core/GameState';
+import { DistrictServiceSystem } from './DistrictServiceSystem';
 
 export interface AdjacencyBonusInfo {
   multiplier: number;
@@ -27,10 +28,11 @@ export class ProductionSystem {
     let mult = 1.0;
     const labels: string[] = [];
 
+    const fp = getBuildingFootprint(def, b.rotation ?? 0);
     if (def.category === 'agricultural') {
       let hasFertileOrRiver = false;
-      for (let dx = -1; dx <= def.width; dx++) {
-        for (let dy = -1; dy <= def.height; dy++) {
+      for (let dx = -1; dx <= fp.width; dx++) {
+        for (let dy = -1; dy <= fp.height; dy++) {
           const { chunk, index } = chunks.getTile(b.gx + dx, b.gy + dy);
           const bio = chunk.biomeId[index] as BiomeId;
           if (bio === BiomeId.Fertile || bio === BiomeId.River) {
@@ -100,36 +102,7 @@ export class ProductionSystem {
     techMods: TechModifiers,
     climate: ClimateModifiers
   ): void {
-    // 1. Power balance
-    let powerGen = 0;
-    let powerDem = 0;
-    for (const b of state.buildings) {
-      if (b.status === 'constructing' || !b.enabled) continue;
-      const def = BUILDINGS[b.defId];
-      if (!def) continue;
-      const lvl = 1 + (b.level - 1) * 0.35;
-
-      if (def.powerOutput) {
-        let p = def.powerOutput * lvl;
-        if (b.defId === 'wind_turbine') p *= climate.windPowerMult;
-        if (b.defId === 'solar_array') p *= climate.solarPowerMult;
-        if (b.defId === 'coal_power_plant') {
-          if (b.assignedWorkers < def.minWorkers || state.resources.coal < 1) {
-            p = 0;
-          }
-        }
-        powerGen += Math.round(p);
-      }
-      if (def.powerDemand) {
-        powerDem += Math.round(def.powerDemand);
-      }
-    }
-
-    state.powerGenerated = powerGen;
-    state.powerDemand = powerDem;
-    const powerFactor = powerDem === 0 ? 1 : powerGen >= powerDem ? 1 : Math.max(0.25, powerGen / Math.max(1, powerDem));
-
-    // Track per-minute net estimate
+    // 1. Track per-minute net estimate (power/water network state already evaluated by UtilityNetworkSystem)
     const tickDeltas: Partial<Record<ResourceId, number>> = {};
     for (const r of RESOURCE_LIST) tickDeltas[r.id] = 0;
 
@@ -157,14 +130,35 @@ export class ProductionSystem {
         continue;
       }
 
-      if (def.powerDemand && powerGen === 0) {
+      if (def.powerDemand && (!b.powerConnected || (b.powerSatisfaction ?? 0) <= 0)) {
         b.status = 'no_power';
+        continue;
+      }
+
+      const needsPipedWater = (def.waterDemand ?? 0) > 0 && (Boolean(def.recipe) || (def.waterDemand ?? 0) >= 2);
+      if (needsPipedWater && (!b.waterConnected || (b.waterSatisfaction ?? 0) <= 0)) {
+        b.status = 'no_water';
         continue;
       }
 
       if (!def.recipe) {
         b.status = 'active';
         continue;
+      }
+
+      const fp = getBuildingFootprint(def, b.rotation ?? 0);
+      if (def.requiredDeposit) {
+        const remainingDeposit = chunks.getFootprintDepositTotal(
+          b.gx,
+          b.gy,
+          fp.width,
+          fp.height,
+          def.requiredDeposit
+        );
+        if (remainingDeposit <= 0) {
+          b.status = 'deposit_depleted';
+          continue;
+        }
       }
 
       const workerEff = workforce.getWorkerEfficiency(b, state, techMods.workerNeedReduction);
@@ -176,8 +170,11 @@ export class ProductionSystem {
       const levelMult = 1 + (b.level - 1) * 0.35;
       const roadMult = roadNet.getBuildingLogisticsMultiplier(b, state, chunks);
       const adjBonus = ProductionSystem.getBuildingAdjacencyBonus(b, state, chunks);
+      const districtCov = DistrictServiceSystem.getBuildingCoverage(b, state);
+      const powerSat = def.powerDemand ? (b.powerSatisfaction ?? 0) : 1;
+      const waterSat = needsPipedWater ? (b.waterSatisfaction ?? 0) : 1;
 
-      let catMult = techMods.prodSpeedMult * adjBonus.multiplier;
+      let catMult = techMods.prodSpeedMult * adjBonus.multiplier * districtCov.prodBonusMult;
       if (def.category === 'agricultural') {
         catMult *= techMods.farmYieldMult * climate.farmMult;
         if (state.activeEvent?.id === 'bountiful_harvest') catMult *= 1.35;
@@ -218,7 +215,8 @@ export class ProductionSystem {
         roadMult *
         catMult *
         toolsMult *
-        (def.powerDemand ? powerFactor : 1);
+        powerSat *
+        waterSat;
 
       b.prodProgress += ratePerSec;
 
@@ -239,7 +237,22 @@ export class ProductionSystem {
           continue;
         }
 
-        // Atomic execute cycle
+        // Atomic execute cycle & local deposit depletion
+        if (def.requiredDeposit) {
+          const depleted = chunks.depleteDepositInFootprint(
+            b.gx,
+            b.gy,
+            fp.width,
+            fp.height,
+            def.requiredDeposit,
+            1
+          );
+          if (!depleted) {
+            b.status = 'deposit_depleted';
+            b.prodProgress = 0.99;
+            continue;
+          }
+        }
         ResourceSystem.consume(state, 0, def.recipe.inputs);
         for (const [k, v] of Object.entries(def.recipe.outputs)) {
           if (v) {

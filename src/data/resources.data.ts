@@ -36,11 +36,13 @@ export type ResourceId =
   | 'copper_ore'
   | 'coal'
   | 'gold_ore'
+  | 'silver_ore'
   | 'marble'
   | 'rubber'
   | 'iron_ingots'
   | 'copper_ingots'
   | 'gold_ingots'
+  | 'silver'
   | 'bricks'
   | 'glass'
   | 'steel'
@@ -377,6 +379,18 @@ export const RESOURCES: Record<ResourceId, ResourceDef> = {
     color: '#fbbf24',
     shortCode: 'GO',
   },
+  silver_ore: {
+    id: 'silver_ore',
+    name: 'Silver Ore',
+    category: 'industrial',
+    storageGroup: 'warehouse',
+    baseCap: 60,
+    basePrice: 20,
+    unlockLevel: 10,
+    foodValue: 0,
+    color: '#cbd5e1',
+    shortCode: 'SO',
+  },
   iron_ingots: {
     id: 'iron_ingots',
     name: 'Iron Ingots',
@@ -412,6 +426,18 @@ export const RESOURCES: Record<ResourceId, ResourceDef> = {
     foodValue: 0,
     color: '#facc15',
     shortCode: 'GI',
+  },
+  silver: {
+    id: 'silver',
+    name: 'Silver',
+    category: 'industrial',
+    storageGroup: 'warehouse',
+    baseCap: 50,
+    basePrice: 46,
+    unlockLevel: 11,
+    foodValue: 0,
+    color: '#e2e8f0',
+    shortCode: 'AG',
   },
   bricks: {
     id: 'bricks',

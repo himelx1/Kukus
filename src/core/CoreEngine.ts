@@ -10,9 +10,12 @@ import {
   TileFlag,
   TileInspection,
   WorldEngineState,
+  ZONE_ID_TO_TYPE,
+  ZONE_TYPE_TO_ID,
 } from './GameState';
 import { gridToChunk } from './IsoMath';
 import { BuildingSystem } from '../systems/BuildingSystem';
+import { CitizenAccounting } from '../systems/CitizenAccounting';
 import { EconomySystem } from '../systems/EconomySystem';
 import { EnvironmentSystem } from '../systems/EnvironmentSystem';
 import { ForestrySystem } from '../systems/ForestrySystem';
@@ -24,6 +27,9 @@ import { RoadNetworkSystem } from '../systems/RoadNetworkSystem';
 import { TechSystem } from '../systems/TechSystem';
 import { WorkforceSystem } from '../systems/WorkforceSystem';
 import { CitizenSystem } from '../systems/CitizenSystem';
+import { UtilityNetworkSystem } from '../systems/UtilityNetworkSystem';
+import { DistrictServiceSystem } from '../systems/DistrictServiceSystem';
+import { PathfindingSystem } from '../systems/PathfindingSystem';
 
 export type EngineEvent =
   | { type: 'CHOP_HIT'; gx: number; gy: number; cleared: boolean; wood: number; coins: number; xp: number; fromCitizen?: boolean }
@@ -101,12 +107,29 @@ export class CoreEngine {
       netRatesPerMin: {},
       buildings: [],
       nextBuildingId: 1,
+      unlockedBuildingLevels: {},
+      cities: [
+        {
+          id: 1,
+          name: 'Kukus Valley',
+          color: '#f59e0b',
+          createdTick: 0,
+          taxRate: 1.0,
+          unlockedTiles: 20,
+        },
+      ],
+      activeCityId: 1,
+      nextCityId: 2,
+      zones: [],
       workforcePriorities: priorities,
+      workforceAutoAssign: true,
+      emergencyWorkTicksRemaining: 0,
       taxRate: 1.0,
       marketPrices: EconomySystem.createInitialMarketPrices(),
       marketPrevPrices: {},
       autoTradeRules: {},
       ledger: [],
+      cityEconomy: {},
       season: 'spring',
       dayInSeason: 1,
       year: 1,
@@ -125,6 +148,9 @@ export class CoreEngine {
         classes: { laborer: 0, artisan: 0, engineer: 0 },
         employed: 0,
         unemployed: 0,
+        homeless: 0,
+        ageBreakdown: { child: 0, underage: 0, adult: 0, elderly: 0 },
+        cohorts: [],
         growthAccumulator: 0,
         needs: {
           food: 1,
@@ -146,6 +172,15 @@ export class CoreEngine {
       powerDemand: 0,
       waterGenerated: 0,
       waterDemand: 0,
+      utilitySummary: {
+        powerConnectedCount: 0,
+        powerDisconnectedCount: 0,
+        powerBrownoutCount: 0,
+        waterConnectedCount: 0,
+        waterDisconnectedCount: 0,
+        waterShortageCount: 0,
+        serviceCoveragePct: 0,
+      },
       roadConnectedCount: 0,
       stats: {
         treesCut: 0,
@@ -168,6 +203,7 @@ export class CoreEngine {
         sfxVolume: 0.85,
         ambientVolume: 0.35,
         graphicsMode: 'auto',
+        crowdDensity: 'auto',
         reducedAnimations: false,
         mildDisasters: true,
         haptics: true,
@@ -201,15 +237,62 @@ export class CoreEngine {
     savedState.stats.festivalsHeld ??= 0;
     savedState.stats.buildingsMoved ??= 0;
     savedState.stats.tradesCompleted ??= 0;
+    savedState.unlockedBuildingLevels ??= {};
+    if (!Array.isArray(savedState.cities) || savedState.cities.length === 0) {
+      savedState.cities = [
+        {
+          id: 1,
+          name: savedState.settings.cityName || 'Kukus Valley',
+          color: '#f59e0b',
+          createdTick: 0,
+          taxRate: savedState.taxRate ?? 1.0,
+          unlockedTiles: savedState.stats.unlockedTiles ?? 20,
+        },
+      ];
+    }
+    savedState.activeCityId ??= savedState.cities[0].id;
+    savedState.nextCityId ??= Math.max(...savedState.cities.map((c) => c.id), 1) + 1;
+    savedState.zones ??= [];
+    savedState.population.homeless ??= 0;
+    savedState.population.ageBreakdown ??= { child: 0, underage: 0, adult: 0, elderly: 0 };
+    savedState.population.cohorts ??= [];
+    savedState.settings.crowdDensity ??= 'auto';
+    savedState.workforceAutoAssign ??= true;
+    savedState.emergencyWorkTicksRemaining ??= 0;
+    savedState.cityEconomy ??= {};
+    savedState.utilitySummary ??= {
+      powerConnectedCount: 0,
+      powerDisconnectedCount: 0,
+      powerBrownoutCount: 0,
+      waterConnectedCount: 0,
+      waterDisconnectedCount: 0,
+      waterShortageCount: 0,
+      serviceCoveragePct: 0,
+    };
+
     this.state = savedState;
     this.chunks = new ChunkManager(savedState.worldSeed);
     this.chunks.setTick(savedState.tick);
     this.chunks.loadPersistedChunks(persistedChunks);
+    this.syncCityTileCounts();
     this.roadNet.markDirty();
     this.roadNet.recomputeIfDirty(this.chunks, this.state);
+    UtilityNetworkSystem.evaluateNetworks(
+      this.state,
+      this.chunks,
+      EnvironmentSystem.getClimateModifiers(this.state)
+    );
+    DistrictServiceSystem.computeWorldServiceCoveragePct(this.state);
     ResourceSystem.recalculateCapacities(this.state);
+    CitizenAccounting.reconcileCohorts(this.state);
     this.citizens.reset();
     this.emit({ type: 'STATE_CHANGED' });
+  }
+
+  public syncCityTileCounts(): void {
+    for (const c of this.state.cities) {
+      c.unlockedTiles = this.chunks.countUnlockedTilesForCity(c.id);
+    }
   }
 
   public resetNewWorld(cityName = 'Kukus Valley', difficulty: 'standard' | 'relaxed' = 'standard'): void {
@@ -217,6 +300,9 @@ export class CoreEngine {
     const fresh = CoreEngine.createInitialState(newSeed);
     fresh.settings.cityName = cityName;
     fresh.settings.difficulty = difficulty;
+    if (fresh.cities[0]) {
+      fresh.cities[0].name = cityName;
+    }
     this.state = fresh;
     this.chunks = new ChunkManager(newSeed);
     this.roadNet.markDirty();
@@ -299,6 +385,7 @@ export class CoreEngine {
 
     if (this.state.festivalTicksRemaining > 0) this.state.festivalTicksRemaining -= 1;
     if (this.state.festivalCooldownTicks > 0) this.state.festivalCooldownTicks -= 1;
+    if (this.state.emergencyWorkTicksRemaining > 0) this.state.emergencyWorkTicksRemaining -= 1;
 
     const techMods = TechSystem.getAggregatedModifiers(this.state);
     EnvironmentSystem.tickSeasonAndWeather(this.state);
@@ -328,8 +415,16 @@ export class CoreEngine {
     );
 
     this.roadNet.recomputeIfDirty(this.chunks, this.state);
+    UtilityNetworkSystem.evaluateNetworks(this.state, this.chunks, climate);
+    DistrictServiceSystem.computeWorldServiceCoveragePct(this.state);
+    if (this.state.tick % 5 === 1) {
+      for (const b of this.state.buildings) {
+        b.entranceValid = PathfindingSystem.findBuildingEntrance(b, this.chunks, 'citizen') !== null;
+      }
+    }
     this.populationSys.tickPopulation(this.state, climate.waterDemandMult);
     this.workforce.assignWorkers(this.state, techMods.workerNeedReduction);
+    CitizenAccounting.reconcileCohorts(this.state);
     this.productionSys.tickProduction(
       this.state,
       this.chunks,
@@ -420,8 +515,9 @@ export class CoreEngine {
           return { ok: false, reason: `Needs ${cost} Coins` };
         }
         this.state.coins -= cost;
-        this.chunks.unlockTile(cmd.gx, cmd.gy);
+        this.chunks.unlockTile(cmd.gx, cmd.gy, this.state.activeCityId || 1);
         this.state.stats.unlockedTiles += 1;
+        this.syncCityTileCounts();
         this.state.xp += 12;
         this.progression.tickProgression(this.state, (lvl, rew) => {
           this.emit({ type: 'LEVEL_UP', level: lvl, rewardCoins: rew });
@@ -433,6 +529,7 @@ export class CoreEngine {
 
       case 'UNLOCK_BATCH_FRONTIER': {
         let unlockedAny = 0;
+        const ownerCity = this.state.activeCityId || 1;
         // Two passes so radial cluster unlocks outward cleanly
         for (let pass = 0; pass < 2; pass++) {
           for (let dy = -cmd.radius; dy <= cmd.radius; dy++) {
@@ -443,7 +540,7 @@ export class CoreEngine {
               const cost = this.chunks.computeUnlockCost(tx, ty);
               if (this.state.coins < cost) continue;
               this.state.coins -= cost;
-              this.chunks.unlockTile(tx, ty);
+              this.chunks.unlockTile(tx, ty, ownerCity);
               this.state.stats.unlockedTiles += 1;
               this.state.xp += 12;
               unlockedAny++;
@@ -452,9 +549,34 @@ export class CoreEngine {
           }
         }
         if (unlockedAny === 0) return { ok: false, reason: 'No affordable frontier tiles in range' };
+        this.syncCityTileCounts();
         this.progression.tickProgression(this.state, (lvl, rew) => {
           this.emit({ type: 'LEVEL_UP', level: lvl, rewardCoins: rew });
         });
+        this.emit({ type: 'STATE_CHANGED' });
+        return { ok: true };
+      }
+
+      case 'UNLOCK_CHUNK': {
+        if (!this.chunks.canUnlockChunk(cmd.cx, cmd.cy)) {
+          return { ok: false, reason: 'Chunk must border an already-unlocked tile' };
+        }
+        const quote = this.chunks.getChunkUnlockCost(cmd.cx, cmd.cy);
+        if (quote.lockedCount === 0) {
+          return { ok: false, reason: 'Chunk is already fully unlocked' };
+        }
+        if (this.state.coins < quote.cost) {
+          return { ok: false, reason: `Needs ${quote.cost} Coins to unlock chunk` };
+        }
+        this.state.coins -= quote.cost;
+        const added = this.chunks.unlockChunk(cmd.cx, cmd.cy, this.state.activeCityId || 1);
+        this.state.stats.unlockedTiles += added;
+        this.syncCityTileCounts();
+        this.state.xp += added * 6;
+        this.progression.tickProgression(this.state, (lvl, rew) => {
+          this.emit({ type: 'LEVEL_UP', level: lvl, rewardCoins: rew });
+        });
+        this.emit({ type: 'TILE_UNLOCKED', gx: cmd.cx * 16 + 8, gy: cmd.cy * 16 + 8 });
         this.emit({ type: 'STATE_CHANGED' });
         return { ok: true };
       }
@@ -466,7 +588,8 @@ export class CoreEngine {
           cmd.gy,
           this.state,
           this.chunks,
-          this.roadNet
+          this.roadNet,
+          cmd.rotation ?? 0
         );
         if (!res.ok || !res.building) return { ok: false, reason: res.reason };
         this.progression.tickProgression(this.state, (lvl, rew) => {
@@ -547,6 +670,28 @@ export class CoreEngine {
         const res = this.buildingSys.upgradeBuilding(cmd.buildingId, this.state);
         if (!res.ok) return { ok: false, reason: res.reason };
         this.state.xp += res.xpGained;
+        this.progression.tickProgression(this.state, (lvl, rew) => {
+          this.emit({ type: 'LEVEL_UP', level: lvl, rewardCoins: rew });
+        });
+        this.emit({ type: 'STATE_CHANGED' });
+        return { ok: true };
+      }
+
+      case 'UPGRADE_BLUEPRINT': {
+        const def = BUILDINGS[cmd.defId];
+        if (!def) return { ok: false, reason: 'Unknown building' };
+        this.state.unlockedBuildingLevels ??= {};
+        const curLevel = Math.max(1, this.state.unlockedBuildingLevels[cmd.defId] ?? 1);
+        if (curLevel >= def.maxLevel) {
+          return { ok: false, reason: `${def.name} blueprint is already max Lv.${def.maxLevel}` };
+        }
+        const cost = Math.max(100, Math.round(def.coinCost * 1.25 * curLevel));
+        if (this.state.coins < cost) {
+          return { ok: false, reason: `Needs ${cost} Coins to upgrade ${def.name} blueprint` };
+        }
+        this.state.coins -= cost;
+        this.state.unlockedBuildingLevels[cmd.defId] = curLevel + 1;
+        this.state.xp += 30;
         this.progression.tickProgression(this.state, (lvl, rew) => {
           this.emit({ type: 'LEVEL_UP', level: lvl, rewardCoins: rew });
         });
@@ -642,6 +787,8 @@ export class CoreEngine {
       case 'DEMOLISH_BUILDING': {
         const ok = this.buildingSys.demolishBuilding(cmd.buildingId, this.state, this.chunks);
         if (!ok) return { ok: false, reason: 'Cannot demolish' };
+        this.workforce.assignWorkers(this.state);
+        CitizenAccounting.reconcileCohorts(this.state);
         this.emit({ type: 'STATE_CHANGED' });
         return { ok: true };
       }
@@ -674,20 +821,71 @@ export class CoreEngine {
       case 'SET_BUILDING_WORKERS': {
         const b = this.state.buildings.find((item) => item.id === cmd.buildingId);
         if (!b) return { ok: false };
-        const def = BUILDINGS[b.defId];
-        if (!def) return { ok: false };
+        const maxCap = this.workforce.getEffectiveMaxWorkers(
+          b,
+          TechSystem.getAggregatedModifiers(this.state).workerNeedReduction
+        );
+        if (maxCap <= 0) return { ok: false, reason: 'Building does not employ workers' };
         b.lockedWorkers =
           cmd.lockedWorkers === null
             ? null
-            : Math.max(0, Math.min(def.maxWorkers, cmd.lockedWorkers));
-        this.workforce.assignWorkers(this.state);
+            : Math.max(0, Math.min(maxCap, cmd.lockedWorkers));
+        this.workforce.assignWorkers(this.state, TechSystem.getAggregatedModifiers(this.state).workerNeedReduction);
+        CitizenAccounting.reconcileCohorts(this.state);
         this.emit({ type: 'STATE_CHANGED' });
         return { ok: true };
       }
 
       case 'SET_WORKFORCE_PRIORITY': {
         this.state.workforcePriorities[cmd.category] = Math.max(1, Math.min(5, cmd.priority));
-        this.workforce.assignWorkers(this.state);
+        this.workforce.assignWorkers(this.state, TechSystem.getAggregatedModifiers(this.state).workerNeedReduction);
+        CitizenAccounting.reconcileCohorts(this.state);
+        this.emit({ type: 'STATE_CHANGED' });
+        return { ok: true };
+      }
+
+      case 'SET_WORKFORCE_AUTO': {
+        this.state.workforceAutoAssign = cmd.enabled;
+        this.workforce.assignWorkers(this.state, TechSystem.getAggregatedModifiers(this.state).workerNeedReduction);
+        CitizenAccounting.reconcileCohorts(this.state);
+        this.emit({ type: 'STATE_CHANGED' });
+        return { ok: true };
+      }
+
+      case 'RECRUIT_WORKERS': {
+        const count = Math.max(1, Math.min(25, Math.floor(cmd.count)));
+        const room = Math.max(0, this.state.population.capacity - this.state.population.total);
+        if (room <= 0) {
+          return { ok: false, reason: 'No spare housing capacity — build or upgrade homes first' };
+        }
+        const actual = Math.min(count, room);
+        const cost = actual * 18;
+        if (this.state.coins < cost) {
+          return { ok: false, reason: `Needs ${cost} Coins to recruit ${actual} workers` };
+        }
+        this.state.coins -= cost;
+        this.state.population.total += actual;
+        if (this.state.population.total > this.state.stats.maxPopulation) {
+          this.state.stats.maxPopulation = this.state.population.total;
+        }
+        this.workforce.assignWorkers(this.state, TechSystem.getAggregatedModifiers(this.state).workerNeedReduction);
+        CitizenAccounting.reconcileCohorts(this.state);
+        this.emit({ type: 'STATE_CHANGED' });
+        return { ok: true };
+      }
+
+      case 'DISPATCH_EMERGENCY_WORKERS': {
+        if ((this.state.emergencyWorkTicksRemaining ?? 0) > 0) {
+          return { ok: false, reason: `Emergency shift active (${this.state.emergencyWorkTicksRemaining}s left)` };
+        }
+        const cost = 60;
+        if (this.state.coins < cost) {
+          return { ok: false, reason: `Needs ${cost} Coins for emergency shift dispatch` };
+        }
+        this.state.coins -= cost;
+        this.state.emergencyWorkTicksRemaining = 45;
+        this.workforce.assignWorkers(this.state, TechSystem.getAggregatedModifiers(this.state).workerNeedReduction);
+        CitizenAccounting.reconcileCohorts(this.state);
         this.emit({ type: 'STATE_CHANGED' });
         return { ok: true };
       }
@@ -838,13 +1036,136 @@ export class CoreEngine {
         if (this.state.coins < cost) {
           return { ok: false, reason: `Needs ${cost} Coins to terraform` };
         }
-        const ok = this.chunks.terraformTile(cmd.gx, cmd.gy, cmd.action);
-        if (!ok) return { ok: false, reason: 'Cannot terraform here (unlocked tile without building required)' };
+        const pre = this.chunks.terraformTile(cmd.gx, cmd.gy, cmd.action, false);
+        if (!pre.ok) {
+          if (pre.needsConfirm && cmd.confirmDemolish) {
+            const { chunk, index } = this.chunks.getTile(cmd.gx, cmd.gy);
+            if (pre.blocker === 'building' && chunk.buildingRef[index] !== -1) {
+              this.buildingSys.demolishBuilding(chunk.buildingRef[index], this.state, this.chunks);
+            }
+            if (chunk.roadType[index] !== 0) {
+              this.buildingSys.removeRoad(cmd.gx, cmd.gy, this.state, this.chunks, this.roadNet);
+            }
+            const retry = this.chunks.terraformTile(cmd.gx, cmd.gy, cmd.action, true);
+            if (!retry.ok) return { ok: false, reason: retry.reason };
+          } else {
+            return { ok: false, reason: pre.reason, needsConfirm: pre.needsConfirm };
+          }
+        }
         this.state.coins -= cost;
         this.state.xp += 15;
+        this.roadNet.markDirty();
+        this.roadNet.recomputeIfDirty(this.chunks, this.state);
+        UtilityNetworkSystem.evaluateNetworks(
+          this.state,
+          this.chunks,
+          EnvironmentSystem.getClimateModifiers(this.state)
+        );
         this.progression.tickProgression(this.state, (lvl, rew) => {
           this.emit({ type: 'LEVEL_UP', level: lvl, rewardCoins: rew });
         });
+        this.emit({ type: 'STATE_CHANGED' });
+        return { ok: true };
+      }
+
+      case 'CREATE_CITY': {
+        const trimmed = cmd.name.trim();
+        if (!trimmed) return { ok: false, reason: 'City name cannot be empty' };
+        const palette = ['#f59e0b', '#38bdf8', '#a3e635', '#f472b6', '#c084fc', '#fb7185'];
+        const id = this.state.nextCityId++;
+        const city = {
+          id,
+          name: trimmed.slice(0, 28),
+          color: cmd.color ?? palette[(id - 1) % palette.length],
+          createdTick: this.state.tick,
+          taxRate: 1.0,
+          unlockedTiles: 0,
+        };
+        this.state.cities.push(city);
+        this.state.activeCityId = id;
+        this.state.settings.cityName = city.name;
+        this.emit({ type: 'STATE_CHANGED' });
+        return { ok: true };
+      }
+
+      case 'RENAME_CITY': {
+        const trimmed = cmd.name.trim();
+        if (!trimmed) return { ok: false, reason: 'City name cannot be empty' };
+        const city = this.state.cities.find((c) => c.id === cmd.cityId);
+        if (!city) return { ok: false, reason: 'City not found' };
+        city.name = trimmed.slice(0, 28);
+        if (this.state.activeCityId === city.id) {
+          this.state.settings.cityName = city.name;
+        }
+        this.emit({ type: 'STATE_CHANGED' });
+        return { ok: true };
+      }
+
+      case 'SET_ACTIVE_CITY': {
+        const city = this.state.cities.find((c) => c.id === cmd.cityId);
+        if (!city) return { ok: false, reason: 'City not found' };
+        this.state.activeCityId = city.id;
+        this.state.settings.cityName = city.name;
+        this.emit({ type: 'STATE_CHANGED' });
+        return { ok: true };
+      }
+
+      case 'ASSIGN_TILE_CITY_ZONE': {
+        if (!this.chunks.isUnlocked(cmd.gx, cmd.gy)) {
+          return { ok: false, reason: 'Tile must be unlocked before assigning city or zone' };
+        }
+        if (cmd.cityId !== undefined) {
+          const cityExists = this.state.cities.some((c) => c.id === cmd.cityId);
+          if (!cityExists) return { ok: false, reason: 'Target city does not exist' };
+          const { chunk, index } = this.chunks.getTile(cmd.gx, cmd.gy);
+          if (chunk.buildingRef[index] !== -1) {
+            return { ok: false, reason: 'Cannot reassign city ownership underneath an existing building' };
+          }
+          this.chunks.setTileCityId(cmd.gx, cmd.gy, cmd.cityId);
+          this.syncCityTileCounts();
+        }
+        if (cmd.zoneType !== undefined) {
+          this.chunks.setTileZone(cmd.gx, cmd.gy, ZONE_TYPE_TO_ID[cmd.zoneType]);
+        }
+        CitizenAccounting.reconcileCohorts(this.state);
+        this.emit({ type: 'STATE_CHANGED' });
+        return { ok: true };
+      }
+
+      case 'SET_UTILITY_TILE': {
+        if (!this.chunks.isUnlocked(cmd.gx, cmd.gy)) {
+          return { ok: false, reason: 'Tile must be unlocked before modifying utilities' };
+        }
+        this.chunks.setTileUtilityFlag(cmd.gx, cmd.gy, cmd.flag, cmd.enabled);
+        UtilityNetworkSystem.evaluateNetworks(
+          this.state,
+          this.chunks,
+          EnvironmentSystem.getClimateModifiers(this.state)
+        );
+        this.emit({ type: 'STATE_CHANGED' });
+        return { ok: true };
+      }
+
+      case 'PLACE_UTILITY': {
+        const res = UtilityNetworkSystem.placeUtility(cmd.kind, cmd.gx, cmd.gy, this.state, this.chunks);
+        if (!res.ok) return res;
+        UtilityNetworkSystem.evaluateNetworks(
+          this.state,
+          this.chunks,
+          EnvironmentSystem.getClimateModifiers(this.state)
+        );
+        this.emit({ type: 'STATE_CHANGED' });
+        return { ok: true };
+      }
+
+      case 'REMOVE_UTILITY': {
+        const res = UtilityNetworkSystem.removeUtility(cmd.kind, cmd.gx, cmd.gy, this.state, this.chunks);
+        if (!res.ok) return res;
+        UtilityNetworkSystem.evaluateNetworks(
+          this.state,
+          this.chunks,
+          EnvironmentSystem.getClimateModifiers(this.state)
+        );
         this.emit({ type: 'STATE_CHANGED' });
         return { ok: true };
       }
@@ -860,6 +1181,9 @@ export class CoreEngine {
     const species = TREE_SPECIES[featureType];
     const bRef = chunk.buildingRef[index];
     const building = bRef >= 0 ? this.state.buildings.find((b) => b.id === bRef) ?? null : null;
+    const cityId = unlocked ? (chunk.cityRef[index] > 0 ? chunk.cityRef[index] : 1) : 0;
+    const cityName = cityId > 0 ? (this.state.cities.find((c) => c.id === cityId)?.name ?? `City #${cityId}`) : 'Wilderness';
+    const zoneType = ZONE_ID_TO_TYPE[chunk.zoneType[index]] ?? 'none';
 
     return {
       gx,
@@ -879,6 +1203,10 @@ export class CoreEngine {
       roadType: chunk.roadType[index],
       building,
       pollution: chunk.pollution[index],
+      cityId,
+      cityName,
+      zoneType,
+      utilityNet: chunk.utilityNet[index],
     };
   }
 }

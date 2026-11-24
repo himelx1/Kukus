@@ -159,6 +159,26 @@ export class IndexedDBStore {
     });
   }
 
+  public async getBackupById(id: string): Promise<StoredBackupRecord | null> {
+    if (!(await this.open()) || !this.db) return null;
+    return new Promise((resolve) => {
+      const tx = this.db!.transaction(['backups'], 'readonly');
+      const req = tx.objectStore('backups').get(id);
+      req.onsuccess = () => resolve((req.result as StoredBackupRecord) ?? null);
+      req.onerror = () => resolve(null);
+    });
+  }
+
+  public async deleteBackupById(id: string): Promise<boolean> {
+    if (!(await this.open()) || !this.db) return false;
+    return new Promise((resolve) => {
+      const tx = this.db!.transaction(['backups'], 'readwrite');
+      tx.objectStore('backups').delete(id);
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => resolve(false);
+    });
+  }
+
   public async deleteSlot(slotId: string): Promise<boolean> {
     if (!(await this.open()) || !this.db) return false;
     const chunks = await this.getChunksForSlot(slotId);

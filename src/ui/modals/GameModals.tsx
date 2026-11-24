@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Download, Upload, X, RotateCcw, Save, Settings, Trophy, Smartphone, Sparkles } from 'lucide-react';
+import { Download, Upload, X, RotateCcw, Save, Settings, Trophy, Smartphone, Building2 } from 'lucide-react';
 import { OfflineManager } from '../../persistence/OfflineManager';
 import type { SaveSlotId, SaveSlotSummary } from '../../persistence/SaveManager';
 import { GameController, GameSnapshot } from '../bridge/GameController';
@@ -84,12 +84,12 @@ const PauseContent: React.FC<{ snap: GameSnapshot }> = ({ snap }) => {
           type="button"
           onClick={() => {
             GameController.setActiveModal('none');
-            GameController.setActiveSheet('changelog');
+            GameController.setSimInspectorOpen(true);
           }}
-          className="w-full min-h-[48px] px-4 rounded-xl bg-[#0b1f15] border border-amber-500/55 hover:border-amber-400/70 text-stone-100 text-sm font-semibold flex items-center gap-3"
+          className="w-full min-h-[48px] px-4 rounded-xl bg-[#0b1f15] border border-emerald-700/55 hover:border-emerald-500/70 text-stone-100 text-sm font-semibold flex items-center gap-3"
         >
-          <Sparkles className="w-4 h-4 text-amber-300" />
-          In-Game Changelog &amp; 100+ Updates
+          <Building2 className="w-4 h-4 text-amber-300" />
+          City &amp; District Inspector
         </button>
 
         <button
@@ -129,16 +129,6 @@ const PauseContent: React.FC<{ snap: GameSnapshot }> = ({ snap }) => {
               </p>
             ) : null}
           </div>
-        ) : null}
-
-        {offline.updateAvailable ? (
-          <button
-            type="button"
-            onClick={() => void OfflineManager.applyUpdate()}
-            className="w-full min-h-[44px] rounded-xl bg-sky-700 text-white text-xs font-semibold"
-          >
-            Update Available — Reload App
-          </button>
         ) : null}
 
         <div className="pt-2 border-t border-emerald-800/50 text-[11px] text-stone-400 flex items-center justify-between">

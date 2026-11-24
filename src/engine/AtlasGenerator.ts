@@ -224,6 +224,11 @@ export function generateWorldAtlas(scene: Phaser.Scene): void {
   drawTreeSprite(ctx, alloc(76, 92, `feat_${FeatureType.Sapling}`), 'sapling');
   drawBambooFeature(ctx, alloc(76, 92, `feat_${FeatureType.BambooCluster}`));
   drawAncientRuinFeature(ctx, alloc(76, 92, `feat_${FeatureType.AncientRuin}`));
+  drawTreeSprite(ctx, alloc(76, 92, `feat_${FeatureType.OakTree}`), 'oak');
+  drawTreeSprite(ctx, alloc(76, 92, `feat_${FeatureType.PineTree}`), 'pine');
+  drawTreeSprite(ctx, alloc(76, 92, `feat_${FeatureType.BirchTree}`), 'birch');
+  drawTreeSprite(ctx, alloc(76, 92, `feat_${FeatureType.CypressTree}`), 'cypress');
+  drawTreeSprite(ctx, alloc(76, 92, `feat_${FeatureType.AcaciaTree}`), 'acacia');
 
   // 5. Mineral Deposits (48x30)
   drawDepositBadge(ctx, alloc(48, 30, `dep_${DepositType.Stone}`), '#cbd5e1', '#64748b', '#e2e8f0');
@@ -233,6 +238,7 @@ export function generateWorldAtlas(scene: Phaser.Scene): void {
   drawDepositBadge(ctx, alloc(48, 30, `dep_${DepositType.CopperOre}`), '#fb923c', '#9a3412', '#fdba74');
   drawDepositBadge(ctx, alloc(48, 30, `dep_${DepositType.Coal}`), '#334155', '#0f172a', '#64748b');
   drawDepositBadge(ctx, alloc(48, 30, `dep_${DepositType.Gold}`), '#facc15', '#92400e', '#fef08a');
+  drawDepositBadge(ctx, alloc(48, 30, `dep_${DepositType.Silver}`), '#f1f5f9', '#475569', '#ffffff');
 
   // 6. Construction scaffolding (72x64)
   drawConstructionFrame(ctx, alloc(72, 64, 'bldg_constructing'));
@@ -610,7 +616,7 @@ function drawRoadTile(ctx: CanvasRenderingContext2D, ox: number, oy: number, roa
 function drawTreeSprite(
   ctx: CanvasRenderingContext2D,
   pos: { x: number; y: number },
-  kind: 'hardwood' | 'palm' | 'fruit' | 'mahogany' | 'sapling'
+  kind: 'hardwood' | 'palm' | 'fruit' | 'mahogany' | 'sapling' | 'oak' | 'pine' | 'birch' | 'cypress' | 'acacia'
 ): void {
   const cx = pos.x + 38;
   const baseY = pos.y + 74;
@@ -620,6 +626,102 @@ function drawTreeSprite(
   ctx.beginPath();
   ctx.ellipse(cx + 3, baseY + 1, kind === 'sapling' ? 7 : 17, kind === 'sapling' ? 3.5 : 8, 0, 0, Math.PI * 2);
   ctx.fill();
+
+  if (kind === 'pine') {
+    ctx.fillStyle = '#57331b';
+    ctx.fillRect(cx - 2.5, baseY - 16, 5, 16);
+    const tiers = [
+      { y: baseY - 13, w: 18, h: 18, col: '#14532d' },
+      { y: baseY - 25, w: 14, h: 17, col: '#166534' },
+      { y: baseY - 37, w: 10, h: 16, col: '#15803d' },
+    ];
+    for (const t of tiers) {
+      ctx.fillStyle = t.col;
+      ctx.beginPath();
+      ctx.moveTo(cx, t.y - t.h);
+      ctx.lineTo(cx + t.w, t.y);
+      ctx.lineTo(cx - t.w, t.y);
+      ctx.closePath();
+      ctx.fill();
+    }
+    return;
+  }
+
+  if (kind === 'birch') {
+    ctx.fillStyle = '#e2e8f0';
+    ctx.fillRect(cx - 2.5, baseY - 26, 5, 26);
+    ctx.fillStyle = '#334155';
+    ctx.fillRect(cx - 2.5, baseY - 20, 3, 2);
+    ctx.fillRect(cx - 0.5, baseY - 12, 3, 2);
+    ctx.fillStyle = '#65a30d';
+    ctx.beginPath();
+    ctx.arc(cx - 5, baseY - 28, 10, 0, Math.PI * 2);
+    ctx.arc(cx + 5, baseY - 27, 9, 0, Math.PI * 2);
+    ctx.arc(cx, baseY - 36, 10, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#bef264';
+    ctx.beginPath();
+    ctx.arc(cx - 2, baseY - 38, 5, 0, Math.PI * 2);
+    ctx.fill();
+    return;
+  }
+
+  if (kind === 'cypress') {
+    ctx.fillStyle = '#452b18';
+    ctx.beginPath();
+    ctx.moveTo(cx - 6, baseY);
+    ctx.lineTo(cx - 2, baseY - 26);
+    ctx.lineTo(cx + 2, baseY - 26);
+    ctx.lineTo(cx + 6, baseY);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = '#1e5631';
+    ctx.beginPath();
+    ctx.ellipse(cx, baseY - 34, 9, 20, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#3a7d44';
+    ctx.beginPath();
+    ctx.ellipse(cx - 2, baseY - 36, 5, 14, 0, 0, Math.PI * 2);
+    ctx.fill();
+    return;
+  }
+
+  if (kind === 'acacia') {
+    ctx.strokeStyle = '#6b4226';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(cx, baseY);
+    ctx.lineTo(cx, baseY - 22);
+    ctx.lineTo(cx - 10, baseY - 31);
+    ctx.moveTo(cx, baseY - 20);
+    ctx.lineTo(cx + 11, baseY - 30);
+    ctx.stroke();
+    ctx.fillStyle = '#4d7c0f';
+    ctx.beginPath();
+    ctx.ellipse(cx, baseY - 33, 21, 7, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#84cc16';
+    ctx.beginPath();
+    ctx.ellipse(cx - 3, baseY - 35, 14, 4.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+    return;
+  }
+
+  if (kind === 'oak') {
+    ctx.fillStyle = '#5c3a21';
+    ctx.fillRect(cx - 4, baseY - 22, 8, 22);
+    ctx.fillStyle = '#15803d';
+    ctx.beginPath();
+    ctx.arc(cx - 10, baseY - 27, 12, 0, Math.PI * 2);
+    ctx.arc(cx + 10, baseY - 27, 12, 0, Math.PI * 2);
+    ctx.arc(cx, baseY - 37, 14, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#4ade80';
+    ctx.beginPath();
+    ctx.arc(cx - 4, baseY - 40, 7, 0, Math.PI * 2);
+    ctx.fill();
+    return;
+  }
 
   if (kind === 'sapling') {
     ctx.fillStyle = '#78350f';
@@ -986,7 +1088,8 @@ function drawBuildingSprite(
     def.id === 'iron_mine' ||
     def.id === 'copper_mine' ||
     def.id === 'coal_mine' ||
-    def.id === 'gold_mine'
+    def.id === 'gold_mine' ||
+    def.id === 'silver_mine'
   ) {
     drawMineOrQuarry(ctx, pTop, pRight, pBottom, pLeft, cx, cy, def);
     return;
@@ -1026,17 +1129,20 @@ function drawBuildingSprite(
   const bLeft = shrink(pLeft);
 
   const bHeight =
-    def.id === 'modern_apartment'
-      ? 42
-      : def.id === 'brick_townhouse' ||
-          def.id === 'hospital' ||
-          def.id === 'town_hall' ||
-          def.id === 'luxury_atelier' ||
-          def.id === 'civic_theater'
-        ? 28
-        : def.category === 'industrial' || def.category === 'energy' || def.category === 'educational'
-          ? 24
-          : 19;
+    def.isMainHq
+      ? 36
+      : def.id === 'modern_apartment'
+        ? 42
+        : def.id === 'brick_townhouse' ||
+            def.id === 'hospital' ||
+            def.id === 'town_hall' ||
+            def.id === 'luxury_atelier' ||
+            def.id === 'civic_theater' ||
+            def.isSubOffice
+          ? 28
+          : def.category === 'industrial' || def.category === 'energy' || def.category === 'educational'
+            ? 24
+            : 19;
 
   // Extruded isometric walls with subtle top-to-bottom lighting gradient
   drawLitIsoWalls(ctx, bTop, bRight, bBottom, bLeft, bHeight, def.wallColor);
@@ -1170,7 +1276,7 @@ function drawBuildingSprite(
       ctx.arc(rx - 3, ry - 4, 3, 0, Math.PI * 2);
       ctx.fill();
     }
-  } else if (def.id === 'town_hall' || def.id === 'civic_theater') {
+  } else if (def.id === 'town_hall' || def.id === 'civic_theater' || def.isMainHq || def.isSubOffice) {
     drawGabledOverhangRoof(ctx, bTop, bRight, bBottom, bLeft, bHeight, def);
     drawCivicColumns(ctx, bLeft, bBottom, bHeight);
     ctx.fillStyle = shadeHex(def.wallColor, 10);
@@ -1190,6 +1296,7 @@ function drawBuildingSprite(
     def.category === 'industrial' ||
     def.id === 'brick_kiln' ||
     def.id === 'mint_foundry' ||
+    def.id === 'silver_smelter' ||
     def.id === 'pottery_workshop'
   ) {
     drawFactoryRooftopAndGear(ctx, bTop, bRight, bBottom, bLeft, cx, cy - lift, bHeight, def);

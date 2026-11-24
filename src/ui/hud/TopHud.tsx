@@ -19,6 +19,7 @@ import {
   FlaskConical,
   ChevronRight,
 } from 'lucide-react';
+import { formatCompactNumber } from '../../core/Formatters';
 import { getXpForNextLevel } from '../../data/levels.data';
 import { ResourceSystem } from '../../systems/ResourceSystem';
 import { GameController, GameSnapshot } from '../bridge/GameController';
@@ -79,18 +80,18 @@ export const TopHud: React.FC<TopHudProps> = ({ snap }) => {
   return (
     <header className="pointer-events-auto w-full bg-gradient-to-b from-[#13291e]/96 to-[#08150f]/95 backdrop-blur-md border-b border-emerald-700/45 pt-safe px-2.5 pb-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_8px_24px_rgba(0,0,0,0.45)]">
       {/* Row 1: Level Crest + City + Calendar/Clock/Speed + Menu */}
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2.5 min-w-0">
+      <div className="flex items-center justify-between gap-1.5 min-w-0">
+        <div className="flex items-center gap-2 flex-1 min-w-0 overflow-hidden">
           {/* Sculpted Level Crest */}
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-b from-amber-400 to-amber-600 text-stone-950 font-extrabold text-xs flex items-center justify-center shrink-0 shadow-[inset_0_1px_0_rgba(255,255,255,0.55),0_2px_0_#78350f] tabular-nums">
+          <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-lg bg-gradient-to-b from-amber-400 to-amber-600 text-stone-950 font-extrabold text-xs flex items-center justify-center shrink-0 shadow-[inset_0_1px_0_rgba(255,255,255,0.55),0_2px_0_#78350f] tabular-nums">
             {state.level}
           </div>
 
-          <div className="flex flex-col justify-center min-w-[76px]">
-            <div className="flex items-baseline justify-between gap-2 text-xs font-semibold text-stone-100 whitespace-nowrap">
-              <span className="truncate max-w-[100px]">{state.settings.cityName}</span>
-              <span className="text-[10px] font-medium text-amber-300/90 tabular-nums">
-                {Math.floor(state.xp)}/{xpReq}
+          <div className="flex flex-col justify-center flex-1 min-w-0">
+            <div className="flex items-baseline justify-between gap-1.5 text-[11px] sm:text-xs font-semibold text-stone-100 whitespace-nowrap min-w-0">
+              <span className="truncate min-w-0">{state.settings.cityName}</span>
+              <span className="text-[10px] font-medium text-amber-300/90 tabular-nums shrink-0">
+                {formatCompactNumber(state.xp)}/{formatCompactNumber(xpReq)}
               </span>
             </div>
             <div className="w-full h-1.5 bg-[#05100b] border border-emerald-900/70 rounded-sm overflow-hidden mt-0.5">
@@ -102,9 +103,9 @@ export const TopHud: React.FC<TopHudProps> = ({ snap }) => {
           </div>
         </div>
 
-        {/* Clock · Season · Weather Forecast · Speed Controls */}
-        <div className="flex items-center gap-1.5 shrink-0">
-          <div className="flex items-center gap-1 text-[11px] text-stone-200 mr-0.5 tabular-nums whitespace-nowrap">
+        {/* Clock · Season · Weather Forecast · Speed Controls · Menu */}
+        <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
+          <div className="flex items-center gap-1 text-[11px] text-stone-200 tabular-nums whitespace-nowrap">
             <TimeIcon
               className={`w-3.5 h-3.5 shrink-0 ${
                 isNight
@@ -115,8 +116,8 @@ export const TopHud: React.FC<TopHudProps> = ({ snap }) => {
               }`}
             />
             <span className="font-semibold">{clockStr}</span>
-            <span className="text-stone-300/90 text-[10px] font-medium">{dayPhaseLabel}</span>
-            <span className="hidden sm:inline text-stone-400">
+            <span className="hidden md:inline text-stone-300/90 text-[10px] font-medium">{dayPhaseLabel}</span>
+            <span className="hidden lg:inline text-stone-400">
               · {seasonLabel} D{state.dayInSeason} · {weatherLabel} → {nextWeatherLabel}
             </span>
           </div>
@@ -126,31 +127,31 @@ export const TopHud: React.FC<TopHudProps> = ({ snap }) => {
               type="button"
               aria-label="Pause"
               onClick={() => GameController.dispatch({ type: 'SET_SPEED', speed: 0 })}
-              className={`min-w-[30px] h-7 flex items-center justify-center rounded-lg text-xs transition-all ${
+              className={`min-w-[26px] sm:min-w-[30px] h-7 flex items-center justify-center rounded-lg text-xs transition-all ${
                 state.speed === 0
                   ? 'bg-gradient-to-b from-amber-400 to-amber-500 text-stone-950 font-bold shadow-[inset_0_1px_0_rgba(255,255,255,0.4)]'
                   : 'text-stone-300 hover:text-white'
               }`}
             >
-              <Pause className="w-3.5 h-3.5" />
+              <Pause className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
             </button>
             <button
               type="button"
               aria-label="1x Speed"
               onClick={() => GameController.dispatch({ type: 'SET_SPEED', speed: 1 })}
-              className={`min-w-[30px] h-7 flex items-center justify-center rounded-lg text-xs transition-all ${
+              className={`min-w-[26px] sm:min-w-[30px] h-7 flex items-center justify-center rounded-lg text-xs transition-all ${
                 state.speed === 1
                   ? 'bg-gradient-to-b from-emerald-500 to-emerald-600 text-white font-bold shadow-[inset_0_1px_0_rgba(255,255,255,0.3)]'
                   : 'text-stone-300 hover:text-white'
               }`}
             >
-              <Play className="w-3.5 h-3.5" />
+              <Play className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
             </button>
             <button
               type="button"
               aria-label="2x Speed"
               onClick={() => GameController.dispatch({ type: 'SET_SPEED', speed: 2 })}
-              className={`min-w-[30px] h-7 px-1 flex items-center justify-center rounded-lg text-[11px] tabular-nums transition-all ${
+              className={`min-w-[26px] sm:min-w-[30px] h-7 px-0.5 sm:px-1 flex items-center justify-center rounded-lg text-[10px] sm:text-[11px] tabular-nums transition-all ${
                 state.speed === 2
                   ? 'bg-gradient-to-b from-emerald-500 to-emerald-600 text-white font-bold shadow-[inset_0_1px_0_rgba(255,255,255,0.3)]'
                   : 'text-stone-300 hover:text-white'
@@ -162,13 +163,13 @@ export const TopHud: React.FC<TopHudProps> = ({ snap }) => {
               type="button"
               aria-label="3x Speed"
               onClick={() => GameController.dispatch({ type: 'SET_SPEED', speed: 3 })}
-              className={`min-w-[30px] h-7 px-1 flex items-center justify-center rounded-lg text-[11px] tabular-nums transition-all ${
+              className={`min-w-[26px] sm:min-w-[30px] h-7 px-0.5 sm:px-1 flex items-center justify-center rounded-lg text-[10px] sm:text-[11px] tabular-nums transition-all ${
                 state.speed === 3
                   ? 'bg-gradient-to-b from-emerald-500 to-emerald-600 text-white font-bold shadow-[inset_0_1px_0_rgba(255,255,255,0.3)]'
                   : 'text-stone-300 hover:text-white'
               }`}
             >
-              <FastForward className="w-3.5 h-3.5" />
+              <FastForward className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
             </button>
           </div>
 
@@ -176,7 +177,7 @@ export const TopHud: React.FC<TopHudProps> = ({ snap }) => {
             type="button"
             aria-label="Menu"
             onClick={() => GameController.setActiveModal('pause')}
-            className="min-w-[36px] min-h-[34px] flex items-center justify-center rounded-xl bg-gradient-to-b from-[#163124] to-[#0c1e16] border border-emerald-700/60 text-stone-100 hover:border-emerald-500/70 shadow-[inset_0_1px_0_rgba(255,255,255,0.1)]"
+            className="min-w-[34px] min-h-[34px] flex items-center justify-center rounded-xl bg-gradient-to-b from-[#163124] to-[#0c1e16] border border-emerald-700/60 text-stone-100 hover:border-emerald-500/70 shadow-[inset_0_1px_0_rgba(255,255,255,0.1)]"
           >
             <Menu className="w-4 h-4" />
           </button>
@@ -192,32 +193,32 @@ export const TopHud: React.FC<TopHudProps> = ({ snap }) => {
         <div className="flex items-center gap-3 overflow-x-auto no-scrollbar">
           <span className="inline-flex items-center gap-1 text-amber-300 font-bold shrink-0">
             <Coins className="w-3.5 h-3.5 text-amber-400" />
-            {Math.floor(state.coins).toLocaleString()}
+            {formatCompactNumber(state.coins)}
           </span>
           <span className="w-px h-3 bg-emerald-900/80 shrink-0" />
           <span className="inline-flex items-center gap-1 text-lime-300 font-medium shrink-0">
             <Trees className="w-3.5 h-3.5 text-lime-400" />
-            {Math.floor(state.resources.wood)}
+            {formatCompactNumber(state.resources.wood)}
           </span>
           <span className="w-px h-3 bg-emerald-900/80 shrink-0" />
           <span className="inline-flex items-center gap-1 text-stone-200 font-medium shrink-0">
             <Box className="w-3.5 h-3.5 text-stone-400" />
-            {Math.floor(state.resources.stone)}
+            {formatCompactNumber(state.resources.stone)}
           </span>
           <span className="w-px h-3 bg-emerald-900/80 shrink-0" />
           <span className="inline-flex items-center gap-1 text-orange-300 font-medium shrink-0">
             <Wheat className="w-3.5 h-3.5 text-orange-400" />
-            {totalFood}
+            {formatCompactNumber(totalFood)}
           </span>
           <span className="w-px h-3 bg-emerald-900/80 shrink-0" />
           <span className="inline-flex items-center gap-1 text-sky-300 font-medium shrink-0">
             <Users className="w-3.5 h-3.5 text-sky-400" />
-            {state.population.total}/{state.population.capacity}
+            {formatCompactNumber(state.population.total)}/{formatCompactNumber(state.population.capacity)}
           </span>
           <span className="w-px h-3 bg-emerald-900/80 shrink-0" />
           <span className="inline-flex items-center gap-1 text-indigo-300 font-medium shrink-0">
             <FlaskConical className="w-3.5 h-3.5 text-indigo-400" />
-            {Math.floor(state.researchPoints)}
+            {formatCompactNumber(state.researchPoints)}
           </span>
           {state.powerDemand > 0 || state.powerGenerated > 0 ? (
             <>

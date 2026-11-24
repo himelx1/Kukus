@@ -10,6 +10,11 @@ export const enum FeatureType {
   Sapling = 6,
   BambooCluster = 7,
   AncientRuin = 8,
+  OakTree = 9,
+  PineTree = 10,
+  BirchTree = 11,
+  CypressTree = 12,
+  AcaciaTree = 13,
 }
 
 export const enum DepositType {
@@ -21,6 +26,7 @@ export const enum DepositType {
   CopperOre = 5,
   Coal = 6,
   Gold = 7,
+  Silver = 8,
 }
 
 export interface TreeSpeciesDef {
@@ -130,7 +136,88 @@ export const TREE_SPECIES: Record<number, TreeSpeciesDef> = {
     xpYield: 35,
     minLevel: 1,
   },
+  [FeatureType.OakTree]: {
+    featureType: FeatureType.OakTree,
+    name: 'Highland Oak',
+    maxHp: 55,
+    woodYield: 10,
+    bonusResource: 'herbs',
+    bonusAmount: 2,
+    bonusChance: 0.25,
+    coinYield: 14,
+    xpYield: 9,
+    minLevel: 1,
+  },
+  [FeatureType.PineTree]: {
+    featureType: FeatureType.PineTree,
+    name: 'Mountain Pine',
+    maxHp: 45,
+    woodYield: 9,
+    coinYield: 11,
+    xpYield: 8,
+    minLevel: 1,
+  },
+  [FeatureType.BirchTree]: {
+    featureType: FeatureType.BirchTree,
+    name: 'Silver Birch',
+    maxHp: 35,
+    woodYield: 7,
+    bonusResource: 'herbs',
+    bonusAmount: 1,
+    bonusChance: 0.3,
+    coinYield: 10,
+    xpYield: 7,
+    minLevel: 1,
+  },
+  [FeatureType.CypressTree]: {
+    featureType: FeatureType.CypressTree,
+    name: 'Swamp Cypress',
+    maxHp: 50,
+    woodYield: 8,
+    bonusResource: 'herbs',
+    bonusAmount: 3,
+    bonusChance: 0.4,
+    coinYield: 13,
+    xpYield: 9,
+    minLevel: 1,
+  },
+  [FeatureType.AcaciaTree]: {
+    featureType: FeatureType.AcaciaTree,
+    name: 'Savanna Acacia',
+    maxHp: 40,
+    woodYield: 6,
+    bonusResource: 'spices',
+    bonusAmount: 2,
+    bonusChance: 0.2,
+    coinYield: 11,
+    xpYield: 8,
+    minLevel: 1,
+  },
 };
+
+export function isTreeFeature(ft: FeatureType): boolean {
+  return (
+    ft === FeatureType.JungleHardwood ||
+    ft === FeatureType.TropicalPalm ||
+    ft === FeatureType.FruitTree ||
+    ft === FeatureType.AncientMahogany ||
+    ft === FeatureType.BambooCluster ||
+    ft === FeatureType.OakTree ||
+    ft === FeatureType.PineTree ||
+    ft === FeatureType.BirchTree ||
+    ft === FeatureType.CypressTree ||
+    ft === FeatureType.AcaciaTree
+  );
+}
+
+export interface MineralDepositDef {
+  depositType: DepositType;
+  name: string;
+  resourceId: ResourceId;
+  baseExtractionRate: number;
+  defaultRichness: number;
+  color: string;
+}
 
 export const DEPOSIT_NAMES: Record<DepositType, string> = {
   [DepositType.None]: 'None',
@@ -141,4 +228,72 @@ export const DEPOSIT_NAMES: Record<DepositType, string> = {
   [DepositType.CopperOre]: 'Copper Vein',
   [DepositType.Coal]: 'Coal Deposit',
   [DepositType.Gold]: 'Gold Ore Vein',
+  [DepositType.Silver]: 'Silver Ore Vein',
+};
+
+export const DEPOSIT_DEFS: Record<Exclude<DepositType, DepositType.None>, MineralDepositDef> = {
+  [DepositType.Stone]: {
+    depositType: DepositType.Stone,
+    name: 'Stone Vein',
+    resourceId: 'stone',
+    baseExtractionRate: 4,
+    defaultRichness: 1000,
+    color: '#94a3b8',
+  },
+  [DepositType.Clay]: {
+    depositType: DepositType.Clay,
+    name: 'Clay Bed',
+    resourceId: 'clay',
+    baseExtractionRate: 4,
+    defaultRichness: 900,
+    color: '#d97706',
+  },
+  [DepositType.Sand]: {
+    depositType: DepositType.Sand,
+    name: 'Silica Sand Bank',
+    resourceId: 'sand',
+    baseExtractionRate: 4,
+    defaultRichness: 1000,
+    color: '#fde047',
+  },
+  [DepositType.IronOre]: {
+    depositType: DepositType.IronOre,
+    name: 'Iron Ore Seam',
+    resourceId: 'iron_ore',
+    baseExtractionRate: 3,
+    defaultRichness: 1400,
+    color: '#64748b',
+  },
+  [DepositType.CopperOre]: {
+    depositType: DepositType.CopperOre,
+    name: 'Copper Vein',
+    resourceId: 'copper_ore',
+    baseExtractionRate: 3,
+    defaultRichness: 1400,
+    color: '#fb923c',
+  },
+  [DepositType.Coal]: {
+    depositType: DepositType.Coal,
+    name: 'Coal Deposit',
+    resourceId: 'coal',
+    baseExtractionRate: 4,
+    defaultRichness: 1600,
+    color: '#334155',
+  },
+  [DepositType.Gold]: {
+    depositType: DepositType.Gold,
+    name: 'Gold Ore Vein',
+    resourceId: 'gold_ore',
+    baseExtractionRate: 2,
+    defaultRichness: 1200,
+    color: '#facc15',
+  },
+  [DepositType.Silver]: {
+    depositType: DepositType.Silver,
+    name: 'Silver Ore Vein',
+    resourceId: 'silver_ore',
+    baseExtractionRate: 3,
+    defaultRichness: 1300,
+    color: '#e2e8f0',
+  },
 };

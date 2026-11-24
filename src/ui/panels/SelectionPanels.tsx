@@ -11,16 +11,20 @@ import {
   Compass,
   Move,
   Copy,
+  Waves,
 } from 'lucide-react';
+import { BiomeId, UtilityFlag } from '../../core/GameState';
 import { BUILDINGS } from '../../data/buildings.data';
 import { RESOURCES, ResourceId } from '../../data/resources.data';
 import { ROADS, RoadType } from '../../data/roads.data';
 import { DEPOSIT_NAMES, DepositType, FeatureType, TREE_SPECIES } from '../../data/trees.data';
+import { DistrictServiceSystem } from '../../systems/DistrictServiceSystem';
 import { ProductionSystem } from '../../systems/ProductionSystem';
 import { GameController, GameSnapshot } from '../bridge/GameController';
 
 export const SelectionPanels: React.FC<{ snap: GameSnapshot }> = ({ snap }) => {
   const [confirmDemolish, setConfirmDemolish] = useState(false);
+  const [pendingTerraform, setPendingTerraform] = useState<'to_water' | 'to_land' | null>(null);
 
   if (snap.selectedBuildingId !== null) {
     const b = snap.state.buildings.find((item) => item.id === snap.selectedBuildingId);
@@ -94,56 +98,102 @@ export const SelectionPanels: React.FC<{ snap: GameSnapshot }> = ({ snap }) => {
             </div>
           ) : null}
 
-          {def.maxWorkers > 0 ? (
-            <div className="flex items-center justify-between text-xs bg-[#08150f] border border-emerald-800/60 rounded-xl px-3 py-2 tabular-nums">
-              <span className="text-stone-200 font-medium">
-                Workers: {b.assignedWorkers}/{def.maxWorkers}
-                {b.lockedWorkers !== null ? ' · Pinned' : ' · Auto'}
-              </span>
-              <div className="flex items-center gap-1.5">
-                <button
-                  type="button"
-                  onClick={() =>
-                    GameController.dispatch({
-                      type: 'SET_BUILDING_WORKERS',
-                      buildingId: b.id,
-                      lockedWorkers: Math.max(0, (b.lockedWorkers ?? b.assignedWorkers) - 1),
-                    })
-                  }
-                  className="w-9 h-9 rounded-lg bg-[#142c20] border border-emerald-800/60 text-stone-100 font-bold"
+          {def.powerDemand || def.waterDemand ? (
+            <div className="flex flex-wrap gap-1.5 text-[11px] tabular-nums">
+              {def.powerDemand ? (
+                <span
+                  className={`px-2 py-0.5 rounded border ${
+                    b.powerConnected
+                      ? 'bg-amber-950/60 border-amber-600/50 text-amber-200'
+                      : 'bg-red-950/70 border-red-700/60 text-red-200'
+                  }`}
                 >
-                  -
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    GameController.dispatch({
-                      type: 'SET_BUILDING_WORKERS',
-                      buildingId: b.id,
-                      lockedWorkers: Math.min(def.maxWorkers, (b.lockedWorkers ?? b.assignedWorkers) + 1),
-                    })
-                  }
-                  className="w-9 h-9 rounded-lg bg-[#142c20] border border-emerald-800/60 text-stone-100 font-bold"
+                  Power: {b.powerConnected ? `${Math.round((b.powerSatisfaction ?? 1) * 100)}%` : 'Off-Grid'}
+                </span>
+              ) : null}
+              {def.waterDemand ? (
+                <span
+                  className={`px-2 py-0.5 rounded border ${
+                    b.waterConnected
+                      ? 'bg-sky-950/60 border-sky-600/50 text-sky-200'
+                      : 'bg-red-950/70 border-red-700/60 text-red-200'
+                  }`}
                 >
-                  +
-                </button>
-                {b.lockedWorkers !== null ? (
-                  <button
-                    type="button"
-                    onClick={() =>
-                      GameController.dispatch({
-                        type: 'SET_BUILDING_WORKERS',
-                        buildingId: b.id,
-                        lockedWorkers: null,
-                      })
-                    }
-                    className="h-9 px-2.5 rounded-lg bg-emerald-700 text-white text-[11px] font-semibold"
-                  >
-                    Auto
-                  </button>
-                ) : null}
-              </div>
+                  Water: {b.waterConnected ? `${Math.round((b.waterSatisfaction ?? 1) * 100)}%` : 'Off-Grid'}
+                </span>
+              ) : null}
+              {(() => {
+                const cov = DistrictServiceSystem.getBuildingCoverage(b, snap.state);
+                const covered =
+                  cov.hasCivicHqOrSub ||
+                  cov.hasTaxCoverage ||
+                  cov.hasEducationCoverage ||
+                  cov.hasWorkerCoverage ||
+                  cov.hasGovCoverage;
+                return covered ? (
+                  <span className="px-2 py-0.5 rounded border bg-emerald-950/60 border-emerald-700/50 text-emerald-200">
+                    District Covered
+                  </span>
+                ) : null;
+              })()}
             </div>
+          ) : null}
+
+          {def.maxWorkers > 0 ? (
+            (() => {
+              const effMax = GameController.engine.workforce.getEffectiveMaxWorkers(b);
+              return (
+                <div className="flex items-center justify-between text-xs bg-[#08150f] border border-emerald-800/60 rounded-xl px-3 py-2 tabular-nums">
+                  <span className="text-stone-200 font-medium">
+                    Workers: {b.assignedWorkers}/{effMax}
+                    {b.lockedWorkers !== null ? ' · Pinned' : ' · Auto'}
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        GameController.dispatch({
+                          type: 'SET_BUILDING_WORKERS',
+                          buildingId: b.id,
+                          lockedWorkers: Math.max(0, (b.lockedWorkers ?? b.assignedWorkers) - 1),
+                        })
+                      }
+                      className="w-9 h-9 rounded-lg bg-[#142c20] border border-emerald-800/60 text-stone-100 font-bold"
+                    >
+                      -
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        GameController.dispatch({
+                          type: 'SET_BUILDING_WORKERS',
+                          buildingId: b.id,
+                          lockedWorkers: Math.min(effMax, (b.lockedWorkers ?? b.assignedWorkers) + 1),
+                        })
+                      }
+                      className="w-9 h-9 rounded-lg bg-[#142c20] border border-emerald-800/60 text-stone-100 font-bold"
+                    >
+                      +
+                    </button>
+                    {b.lockedWorkers !== null ? (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          GameController.dispatch({
+                            type: 'SET_BUILDING_WORKERS',
+                            buildingId: b.id,
+                            lockedWorkers: null,
+                          })
+                        }
+                        className="h-9 px-2.5 rounded-lg bg-emerald-700 text-white text-[11px] font-semibold"
+                      >
+                        Auto
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+              );
+            })()
           ) : null}
 
           <div className="space-y-2 pt-0.5">
@@ -250,16 +300,21 @@ export const SelectionPanels: React.FC<{ snap: GameSnapshot }> = ({ snap }) => {
               </div>
               <div className="text-xs text-stone-300/85 tabular-nums mt-0.5">
                 <span className={t.unlocked ? 'text-emerald-300 font-semibold' : 'text-sky-300 font-semibold'}>
-                  {t.unlocked ? 'Owned Sunlit Land' : t.canUnlock ? 'Unlockable Frontier' : 'Locked Wilderness'}
+                  {t.unlocked ? t.cityName : t.canUnlock ? 'Unlockable Border' : 'Locked Wilderness'}
                 </span>
-                {` · Elev ${t.elevation}`}
+                {t.zoneType !== 'none' ? ` · ${t.zoneType}` : ''}
+                {(t.utilityNet & UtilityFlag.PowerLine) !== 0 ? ' · Power' : ''}
+                {(t.utilityNet & UtilityFlag.WaterPipe) !== 0 ? ' · Water' : ''}
                 {t.depositType !== DepositType.None ? ` · ${depName} (${t.depositQty})` : ''}
                 {curRoad ? ` · ${curRoad.name} (${curRoad.speedMultiplier}×)` : ''}
               </div>
             </div>
             <button
               type="button"
-              onClick={() => GameController.clearSelection()}
+              onClick={() => {
+                setPendingTerraform(null);
+                GameController.clearSelection();
+              }}
               className="min-w-[44px] min-h-[44px] flex items-center justify-center rounded-xl bg-[#0a1a12] border border-emerald-800/60 text-stone-300 hover:text-white"
             >
               <X className="w-4 h-4" />
@@ -357,6 +412,81 @@ export const SelectionPanels: React.FC<{ snap: GameSnapshot }> = ({ snap }) => {
               </>
             )}
           </div>
+
+          {t.unlocked ? (
+            t.biomeId === BiomeId.Mountain ? (
+              <div className="text-[11px] text-stone-400">
+                Permanent mountain terrain (cannot be converted to water or flatland).
+              </div>
+            ) : pendingTerraform ? (
+              <div className="p-2.5 rounded-xl bg-red-950/70 border border-red-700/70 flex items-center justify-between gap-2 text-xs">
+                <span className="text-red-100 font-medium">Remove existing road/structure &amp; terraform?</span>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      GameController.dispatchResult({
+                        type: 'TERRAFORM_TILE',
+                        gx: t.gx,
+                        gy: t.gy,
+                        action: pendingTerraform,
+                        confirmDemolish: true,
+                      });
+                      setPendingTerraform(null);
+                    }}
+                    className="h-8 px-2.5 rounded-lg bg-red-600 text-white font-bold text-[11px]"
+                  >
+                    Confirm
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPendingTerraform(null)}
+                    className="h-8 px-2 rounded-lg bg-[#0a1a12] text-stone-300 text-[11px]"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2 pt-0.5">
+                {t.biomeId === BiomeId.River || t.biomeId === BiomeId.DeepWater ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const res = GameController.dispatchResult({
+                        type: 'TERRAFORM_TILE',
+                        gx: t.gx,
+                        gy: t.gy,
+                        action: 'to_land',
+                      });
+                      if (res.needsConfirm) setPendingTerraform('to_land');
+                    }}
+                    className="flex-1 min-h-[38px] px-3 rounded-xl bg-[#0d2433] border border-emerald-700/60 text-emerald-200 font-semibold text-xs flex items-center justify-center gap-1.5"
+                  >
+                    <Waves className="w-3.5 h-3.5" />
+                    Reclaim as Land (75C)
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const res = GameController.dispatchResult({
+                        type: 'TERRAFORM_TILE',
+                        gx: t.gx,
+                        gy: t.gy,
+                        action: 'to_water',
+                      });
+                      if (res.needsConfirm) setPendingTerraform('to_water');
+                    }}
+                    className="flex-1 min-h-[38px] px-3 rounded-xl bg-[#0d2433] border border-sky-700/60 text-sky-200 font-semibold text-xs flex items-center justify-center gap-1.5"
+                  >
+                    <Waves className="w-3.5 h-3.5" />
+                    Convert to Canal/Water (75C)
+                  </button>
+                )}
+              </div>
+            )
+          ) : null}
         </div>
       </div>
     );

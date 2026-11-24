@@ -1,5 +1,5 @@
 import { BUILDINGS } from '../data/buildings.data';
-import { FeatureType } from '../data/trees.data';
+import { FeatureType, isTreeFeature } from '../data/trees.data';
 import type { ChunkManager } from '../core/ChunkManager';
 import { SeasonType, TileFlag, WeatherType, WorldEngineState } from '../core/GameState';
 import { CHUNK_SIZE } from '../core/IsoMath';
@@ -182,13 +182,7 @@ export class EnvironmentSystem {
         if ((chunk.flags[i] & TileFlag.Unlocked) !== 0) {
           unlockedCount++;
           const ft = chunk.featureType[i] as FeatureType;
-          if (
-            ft === FeatureType.JungleHardwood ||
-            ft === FeatureType.TropicalPalm ||
-            ft === FeatureType.FruitTree ||
-            ft === FeatureType.AncientMahogany ||
-            ft === FeatureType.BambooCluster
-          ) {
+          if (isTreeFeature(ft)) {
             treeCount++;
           }
         }

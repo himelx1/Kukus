@@ -6,13 +6,13 @@ import { TopHud } from './ui/hud/TopHud';
 import { GameModals } from './ui/modals/GameModals';
 import { AchievementsSheet } from './ui/panels/AchievementsSheet';
 import { BuildMenuSheet } from './ui/panels/BuildMenuSheet';
-import { ChangelogSheet } from './ui/panels/ChangelogSheet';
 import { EconomySheet } from './ui/panels/EconomySheet';
 import { InventorySheet } from './ui/panels/InventorySheet';
 import { LandUnlockSheet } from './ui/panels/LandUnlockSheet';
 import { PopulationSheet } from './ui/panels/PopulationSheet';
 import { QuestsSheet } from './ui/panels/QuestsSheet';
 import { SelectionPanels } from './ui/panels/SelectionPanels';
+import { SimInspectorDrawer } from './ui/panels/SimInspectorDrawer';
 import { TechTreeSheet } from './ui/panels/TechTreeSheet';
 
 export default function App() {
@@ -52,7 +52,9 @@ export default function App() {
       {snap.activeSheet === 'tech' && <TechTreeSheet snap={snap} />}
       {snap.activeSheet === 'quests' && <QuestsSheet snap={snap} />}
       {snap.activeSheet === 'achievements' && <AchievementsSheet snap={snap} />}
-      {snap.activeSheet === 'changelog' && <ChangelogSheet snap={snap} />}
+
+      {/* City & District Inspector Drawer */}
+      {snap.simInspectorOpen && <SimInspectorDrawer snap={snap} />}
 
       {/* Pause, Settings & Save Manager Modals */}
       <GameModals snap={snap} />

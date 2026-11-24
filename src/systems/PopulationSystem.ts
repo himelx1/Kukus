@@ -1,6 +1,8 @@
 import { BUILDINGS } from '../data/buildings.data';
 import type { WorldEngineState } from '../core/GameState';
 import { ResourceSystem } from './ResourceSystem';
+import { CitizenAccounting } from './CitizenAccounting';
+import { DistrictServiceSystem } from './DistrictServiceSystem';
 
 export class PopulationSystem {
   public tickPopulation(state: WorldEngineState, weatherWaterMult: number): void {
@@ -30,7 +32,10 @@ export class PopulationSystem {
       }
       if (b.status === 'active' || def.minWorkers === 0) {
         if (def.healthcareBonus) healthCap += Math.round(def.healthcareBonus * levelScale);
-        if (def.educationBonus) eduCap += Math.round(def.educationBonus * levelScale);
+        if (def.educationBonus) {
+          const cov = DistrictServiceSystem.getBuildingCoverage(b, state);
+          eduCap += Math.round(def.educationBonus * levelScale * cov.educationBonusMult);
+        }
         if (def.safetyBonus) safetyCap += Math.round(def.safetyBonus * levelScale);
         if (def.recreationBonus) recCap += Math.round(def.recreationBonus * levelScale);
         if (def.happinessBonus) flatHappiness += def.happinessBonus;
@@ -119,6 +124,7 @@ export class PopulationSystem {
       ((state.resources.spices ?? 0) >= 1 ? 2 : 0) +
       ((state.resources.luxury_goods ?? 0) >= 1 ? 3 : 0);
 
+    const homelessPenalty = Math.min(18, (state.population.homeless ?? 0) * 1.5);
     const rawHappiness =
       52 +
       foodDelta +
@@ -130,7 +136,8 @@ export class PopulationSystem {
       festivalBoost +
       policyHappy +
       luxuryComfort -
-      pollutionPenalty;
+      pollutionPenalty -
+      homelessPenalty;
 
     state.population.happiness = Math.round(Math.max(0, Math.min(100, rawHappiness)));
 
@@ -175,5 +182,7 @@ export class PopulationSystem {
       artisan: artisans,
       engineer: engineers,
     };
+
+    CitizenAccounting.reconcileCohorts(state);
   }
 }

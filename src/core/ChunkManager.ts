@@ -1,4 +1,5 @@
-import { BiomeId, ChunkData, TileFlag } from './GameState';
+import { DepositType } from '../data/trees.data';
+import { BiomeId, ChunkData, TileFlag, UtilityFlag, ZoneId } from './GameState';
 import { CHUNK_SIZE, chunkKey, gridToChunk } from './IsoMath';
 import { WorldGenerator } from './WorldGenerator';
 
@@ -149,18 +150,105 @@ export class ChunkManager {
     return !this.isUnlocked(gx, gy) && this.isAdjacentToUnlocked(gx, gy);
   }
 
-  public computeUnlockCost(gx: number, gy: number): number {
+  public computeUnlockCost(gx: number, gy: number, totalUnlocked?: number): number {
     const { chunk, index } = this.getTile(gx, gy);
     const biome = chunk.biomeId[index] as BiomeId;
     const d = Math.abs(gx - 2) + Math.abs(gy - 1.5);
     const mult = BIOME_UNLOCK_COST_MULT[biome] ?? 1.0;
-    return Math.round((35 + 11 * Math.pow(Math.max(1, d), 1.15)) * mult);
+    const unlockedCount = totalUnlocked ?? this.countUnlockedTiles();
+    const expansionFactor = 1 + Math.max(0, unlockedCount - 20) * 0.012;
+    return Math.round((35 + 11 * Math.pow(Math.max(1, d), 1.15)) * mult * expansionFactor);
   }
 
-  public unlockTile(gx: number, gy: number): void {
+  public canUnlockChunk(cx: number, cy: number): boolean {
+    const chunk = this.getOrCreateChunk(cx, cy);
+    let hasLocked = false;
+    let touchesUnlocked = false;
+    for (let ly = 0; ly < CHUNK_SIZE; ly++) {
+      for (let lx = 0; lx < CHUNK_SIZE; lx++) {
+        const idx = ly * CHUNK_SIZE + lx;
+        if ((chunk.flags[idx] & TileFlag.Unlocked) === 0) {
+          hasLocked = true;
+          const gx = cx * CHUNK_SIZE + lx;
+          const gy = cy * CHUNK_SIZE + ly;
+          if (this.isAdjacentToUnlocked(gx, gy)) {
+            touchesUnlocked = true;
+          }
+        }
+      }
+    }
+    return hasLocked && touchesUnlocked;
+  }
+
+  public getChunkUnlockCost(cx: number, cy: number): { lockedCount: number; cost: number } {
+    const chunk = this.getOrCreateChunk(cx, cy);
+    const totalUnlocked = this.countUnlockedTiles();
+    let lockedCount = 0;
+    let sumCost = 0;
+    for (let ly = 0; ly < CHUNK_SIZE; ly++) {
+      for (let lx = 0; lx < CHUNK_SIZE; lx++) {
+        const idx = ly * CHUNK_SIZE + lx;
+        if ((chunk.flags[idx] & TileFlag.Unlocked) === 0) {
+          const gx = cx * CHUNK_SIZE + lx;
+          const gy = cy * CHUNK_SIZE + ly;
+          sumCost += this.computeUnlockCost(gx, gy, totalUnlocked + lockedCount);
+          lockedCount++;
+        }
+      }
+    }
+    // 20% bulk discount when expanding an entire 16x16 chunk
+    return {
+      lockedCount,
+      cost: lockedCount > 0 ? Math.round(sumCost * 0.8) : 0,
+    };
+  }
+
+  public unlockChunk(cx: number, cy: number, cityId = 1): number {
+    const chunk = this.getOrCreateChunk(cx, cy);
+    let newlyUnlocked = 0;
+    for (let ly = 0; ly < CHUNK_SIZE; ly++) {
+      for (let lx = 0; lx < CHUNK_SIZE; lx++) {
+        const idx = ly * CHUNK_SIZE + lx;
+        if ((chunk.flags[idx] & TileFlag.Unlocked) === 0) {
+          const gx = cx * CHUNK_SIZE + lx;
+          const gy = cy * CHUNK_SIZE + ly;
+          chunk.flags[idx] |= TileFlag.Unlocked | TileFlag.Explored;
+          if (chunk.cityRef[idx] === 0) {
+            chunk.cityRef[idx] = cityId;
+          }
+          const biome = chunk.biomeId[idx] as BiomeId;
+          if (!this.isWaterBiome(biome)) {
+            chunk.elevation[idx] = 2;
+          }
+          newlyUnlocked++;
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              const n = gridToChunk(gx + dx, gy + dy);
+              const nc = this.getOrCreateChunk(n.cx, n.cy);
+              if ((nc.flags[n.index] & TileFlag.Explored) === 0) {
+                nc.flags[n.index] |= TileFlag.Explored;
+                nc.isModified = true;
+                this.dirtyRenderKeys.add(nc.key);
+                this.dirtySaveKeys.add(nc.key);
+              }
+            }
+          }
+        }
+      }
+    }
+    if (newlyUnlocked > 0) {
+      this.markChunkModified(cx, cy);
+    }
+    return newlyUnlocked;
+  }
+
+  public unlockTile(gx: number, gy: number, cityId = 1): void {
     const { cx, cy, index } = gridToChunk(gx, gy);
     const chunk = this.getOrCreateChunk(cx, cy);
     chunk.flags[index] |= TileFlag.Unlocked | TileFlag.Explored;
+    if (chunk.cityRef[index] === 0) {
+      chunk.cityRef[index] = cityId;
+    }
     // Owned land becomes flat buildable terrain (water stays recessed at elev 0/1)
     const biome = chunk.biomeId[index] as BiomeId;
     if (!this.isWaterBiome(biome)) {
@@ -184,6 +272,112 @@ export class ChunkManager {
         }
       }
     }
+  }
+
+  public getTileCityId(gx: number, gy: number): number {
+    const { chunk, index } = this.getTile(gx, gy);
+    if (chunk.cityRef[index] > 0) return chunk.cityRef[index];
+    return (chunk.flags[index] & TileFlag.Unlocked) !== 0 ? 1 : 0;
+  }
+
+  public setTileCityId(gx: number, gy: number, cityId: number): boolean {
+    const { cx, cy, index } = gridToChunk(gx, gy);
+    const chunk = this.getOrCreateChunk(cx, cy);
+    if ((chunk.flags[index] & TileFlag.Unlocked) === 0) return false;
+    chunk.cityRef[index] = Math.max(1, cityId);
+    this.markChunkModified(cx, cy);
+    return true;
+  }
+
+  public getTileZone(gx: number, gy: number): ZoneId {
+    const { chunk, index } = this.getTile(gx, gy);
+    return chunk.zoneType[index] as ZoneId;
+  }
+
+  public setTileZone(gx: number, gy: number, zoneId: ZoneId): boolean {
+    const { cx, cy, index } = gridToChunk(gx, gy);
+    const chunk = this.getOrCreateChunk(cx, cy);
+    if ((chunk.flags[index] & TileFlag.Unlocked) === 0) return false;
+    chunk.zoneType[index] = zoneId;
+    this.markChunkModified(cx, cy);
+    return true;
+  }
+
+  public getTileUtility(gx: number, gy: number): number {
+    const { chunk, index } = this.getTile(gx, gy);
+    return chunk.utilityNet[index];
+  }
+
+  public setTileUtilityFlag(gx: number, gy: number, flag: UtilityFlag, enabled: boolean): boolean {
+    const { cx, cy, index } = gridToChunk(gx, gy);
+    const chunk = this.getOrCreateChunk(cx, cy);
+    if ((chunk.flags[index] & TileFlag.Unlocked) === 0) return false;
+    if (enabled) {
+      chunk.utilityNet[index] |= flag;
+    } else {
+      chunk.utilityNet[index] &= ~flag;
+    }
+    this.markChunkModified(cx, cy);
+    return true;
+  }
+
+  public countUnlockedTilesForCity(cityId: number): number {
+    let count = 0;
+    for (const c of this.chunks.values()) {
+      if (!c.isModified) continue;
+      for (let i = 0; i < CHUNK_SIZE * CHUNK_SIZE; i++) {
+        if ((c.flags[i] & TileFlag.Unlocked) !== 0) {
+          const owner = c.cityRef[i] > 0 ? c.cityRef[i] : 1;
+          if (owner === cityId) count++;
+        }
+      }
+    }
+    return count;
+  }
+
+  public getFootprintDepositTotal(
+    gx: number,
+    gy: number,
+    width: number,
+    height: number,
+    depositType: DepositType
+  ): number {
+    let total = 0;
+    for (let dx = 0; dx < width; dx++) {
+      for (let dy = 0; dy < height; dy++) {
+        const { chunk, index } = this.getTile(gx + dx, gy + dy);
+        if (chunk.depositType[index] === depositType) {
+          total += chunk.depositQty[index];
+        }
+      }
+    }
+    return total;
+  }
+
+  public depleteDepositInFootprint(
+    gx: number,
+    gy: number,
+    width: number,
+    height: number,
+    depositType: DepositType,
+    amount: number
+  ): boolean {
+    if (amount <= 0) return true;
+    for (let dx = 0; dx < width; dx++) {
+      for (let dy = 0; dy < height; dy++) {
+        const tx = gx + dx;
+        const ty = gy + dy;
+        const { cx, cy, index } = gridToChunk(tx, ty);
+        const chunk = this.getOrCreateChunk(cx, cy);
+        if (chunk.depositType[index] === depositType && chunk.depositQty[index] > 0) {
+          const take = Math.min(chunk.depositQty[index], Math.max(1, Math.round(amount)));
+          chunk.depositQty[index] -= take;
+          this.markChunkModified(cx, cy);
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   public getUnlockedGridBounds(): {
@@ -266,7 +460,12 @@ export class ChunkManager {
         const unlocked = (chunk.flags[index] & TileFlag.Unlocked) !== 0;
         let match = false;
 
-        if (opts.depositType && chunk.depositType[index] === opts.depositType && chunk.buildingRef[index] === -1) {
+        if (
+          opts.depositType &&
+          chunk.depositType[index] === opts.depositType &&
+          chunk.depositQty[index] > 0 &&
+          chunk.buildingRef[index] === -1
+        ) {
           match = true;
         } else if (opts.ruin && chunk.featureType[index] === 8) {
           match = true;
@@ -295,23 +494,61 @@ export class ChunkManager {
     return best ? { gx: best.gx, gy: best.gy, unlocked: best.unlocked } : null;
   }
 
-  public terraformTile(gx: number, gy: number, action: 'to_water' | 'to_land'): boolean {
+  public terraformTile(
+    gx: number,
+    gy: number,
+    action: 'to_water' | 'to_land',
+    confirmDemolish = false
+  ): { ok: boolean; reason?: string; needsConfirm?: boolean; blocker?: 'mountain' | 'building' | 'road' } {
     const { cx, cy, index } = gridToChunk(gx, gy);
     const chunk = this.getOrCreateChunk(cx, cy);
     const isUnlocked = (chunk.flags[index] & TileFlag.Unlocked) !== 0;
-    if (!isUnlocked) return false;
-    if (chunk.buildingRef[index] !== -1) return false;
+    if (!isUnlocked) {
+      return { ok: false, reason: 'Unlock tile first before terraforming' };
+    }
+    if ((chunk.biomeId[index] as BiomeId) === BiomeId.Mountain) {
+      return {
+        ok: false,
+        blocker: 'mountain',
+        reason: 'Mountains are permanent terrain and cannot be terraformed',
+      };
+    }
+    if (chunk.buildingRef[index] !== -1 && !confirmDemolish) {
+      return {
+        ok: false,
+        needsConfirm: true,
+        blocker: 'building',
+        reason: 'Tile has a building — confirm demolition to terraform',
+      };
+    }
+    if (chunk.roadType[index] !== 0 && !confirmDemolish) {
+      return {
+        ok: false,
+        needsConfirm: true,
+        blocker: 'road',
+        reason: 'Tile has a road or rail — confirm removal to terraform',
+      };
+    }
+
+    const currentlyWater = this.isWaterBiome(chunk.biomeId[index] as BiomeId);
+    if (action === 'to_water' && currentlyWater) {
+      return { ok: false, reason: 'Tile is already water' };
+    }
+    if (action === 'to_land' && !currentlyWater) {
+      return { ok: false, reason: 'Tile is already dry land' };
+    }
 
     if (action === 'to_water') {
       chunk.biomeId[index] = BiomeId.River;
       chunk.elevation[index] = 1;
       chunk.featureType[index] = 0;
+      chunk.featureHp[index] = 0;
     } else {
       chunk.biomeId[index] = BiomeId.Grassland;
       chunk.elevation[index] = 2;
     }
     this.markChunkModified(cx, cy);
     this.dirtyRenderKeys.add(chunk.key);
-    return true;
+    return { ok: true };
   }
 }

@@ -1,8 +1,9 @@
 import { BUILDINGS } from '../data/buildings.data';
 import { POLICY_MAP } from '../data/policies.data';
 import { RESOURCE_LIST, RESOURCES, ResourceId } from '../data/resources.data';
-import type { WorldEngineState } from '../core/GameState';
+import type { CityEconomySnapshot, WorldEngineState } from '../core/GameState';
 import { ResourceSystem } from './ResourceSystem';
+import { DistrictServiceSystem } from './DistrictServiceSystem';
 
 export interface MissingMaterialPurchaseItem {
   resourceId: ResourceId;
@@ -246,14 +247,41 @@ export class EconomySystem {
           b.defId === 'festival_plaza')
     );
 
+    const cityEcon: Record<number, CityEconomySnapshot> = {};
+    for (const c of state.cities) {
+      cityEcon[c.id] = {
+        cityId: c.id,
+        taxIncome: 0,
+        upkeepExpense: 0,
+        wageExpense: 0,
+        net: 0,
+        buildingCount: 0,
+      };
+    }
+
     for (const b of state.buildings) {
       if (b.status === 'constructing') continue;
       const def = BUILDINGS[b.defId];
       if (!def) continue;
 
+      const cid = b.cityId ?? state.activeCityId ?? 1;
+      const citySnap =
+        cityEcon[cid] ??
+        (cityEcon[cid] = {
+          cityId: cid,
+          taxIncome: 0,
+          upkeepExpense: 0,
+          wageExpense: 0,
+          net: 0,
+          buildingCount: 0,
+        });
+      citySnap.buildingCount += 1;
+
       const levelScale = 1 + (b.level - 1) * 0.35;
+      const cov = DistrictServiceSystem.getBuildingCoverage(b, state);
+      let bTax = 0;
       if (def.taxPerMin && (def.category === 'residential' || b.status === 'active')) {
-        let t = def.taxPerMin * levelScale;
+        let t = def.taxPerMin * levelScale * cov.taxBonusMult;
         if (def.category === 'residential') {
           const fillRatio = state.population.capacity > 0 ? Math.min(1, state.population.total / state.population.capacity) : 0;
           const nearScenic = scenicNodes.some((s) => Math.abs(s.gx - b.gx) <= 3 && Math.abs(s.gy - b.gy) <= 3);
@@ -264,17 +292,23 @@ export class EconomySystem {
           if (def.category === 'commercial') t *= nightBazaarMult;
           if (b.defId === 'night_market' && isNightHours) t *= 2.0;
         }
-        taxPerMin += t * festivalTaxMult;
+        bTax = t * festivalTaxMult;
+        taxPerMin += bTax;
+        citySnap.taxIncome += bTax;
       }
 
       if (b.enabled && def.upkeepPerMin > 0) {
         const relaxedFactor = state.settings.difficulty === 'relaxed' ? 0.75 : 1.0;
-        upkeepPerMin += def.upkeepPerMin * (1 + (b.level - 1) * 0.25) * relaxedFactor * fireDiscount;
+        const bUpkeep = def.upkeepPerMin * (1 + (b.level - 1) * 0.25) * relaxedFactor * fireDiscount;
+        upkeepPerMin += bUpkeep;
+        citySnap.upkeepExpense += bUpkeep;
       }
 
       if (b.assignedWorkers > 0) {
         const wageRate = def.workerClass === 'engineer' ? 1.2 : def.workerClass === 'artisan' ? 0.7 : 0.35;
-        wagesPerMin += b.assignedWorkers * wageRate;
+        const bWages = b.assignedWorkers * wageRate;
+        wagesPerMin += bWages;
+        citySnap.wageExpense += bWages;
       }
     }
 
@@ -283,6 +317,14 @@ export class EconomySystem {
       const pDef = POLICY_MAP[pid];
       if (pDef) upkeepPerMin += pDef.upkeepPerMin;
     }
+
+    for (const snap of Object.values(cityEcon)) {
+      snap.taxIncome = Math.round(snap.taxIncome);
+      snap.upkeepExpense = Math.round(snap.upkeepExpense);
+      snap.wageExpense = Math.round(snap.wageExpense);
+      snap.net = snap.taxIncome - snap.upkeepExpense - snap.wageExpense;
+    }
+    state.cityEconomy = cityEcon;
 
     // Execute net budget per tick (1/60 of per-minute flow)
     const taxTick = taxPerMin / 60;

@@ -3,7 +3,7 @@ import { BUILDINGS } from '../data/buildings.data';
 import { RoadType } from '../data/roads.data';
 import { DepositType, FeatureType } from '../data/trees.data';
 import type { CoreEngine } from '../core/CoreEngine';
-import { BiomeId, ChunkData, TileFlag } from '../core/GameState';
+import { BiomeId, ChunkData, TileFlag, UtilityFlag, ZoneId } from '../core/GameState';
 import {
   CHUNK_SIZE,
   chunkKey,
@@ -13,10 +13,13 @@ import {
   isoToGridApprox,
 } from '../core/IsoMath';
 import type { PerfMonitor } from '../persistence/PerfMonitor';
+import type { UtilityPlacementKind } from '../systems/UtilityNetworkSystem';
 import { ATLAS_KEY, generateWorldAtlas } from './AtlasGenerator';
 import type { AudioSystem } from './AudioSystem';
 import { CameraInputController } from './CameraInputController';
 import { VfxPool } from './VfxPool';
+
+export type OverlayMode = 'none' | 'power' | 'water' | 'zones' | 'deposits' | 'paths';
 
 export type InteractionTool =
   | { mode: 'inspect_chop' }
@@ -25,7 +28,9 @@ export type InteractionTool =
   | { mode: 'move'; buildingId: number }
   | { mode: 'road'; roadType: RoadType }
   | { mode: 'replant' }
-  | { mode: 'demolish' };
+  | { mode: 'demolish' }
+  | { mode: 'place_utility'; kind: UtilityPlacementKind }
+  | { mode: 'remove_utility'; kind: 'power' | 'water' };
 
 import type { PlacementValidation } from '../systems/BuildingSystem';
 
@@ -105,12 +110,15 @@ export class WorldScene extends Phaser.Scene {
   private selectedCursor!: Phaser.GameObjects.Image;
   private ghostFootprintSprites: Phaser.GameObjects.Image[] = [];
   private ghostBuildingSprite!: Phaser.GameObjects.Image;
+  private roadBakeGfx!: Phaser.GameObjects.Graphics;
+  private overlayGraphics!: Phaser.GameObjects.Graphics;
   private skyWashOverlay!: Phaser.GameObjects.Rectangle;
   private ambientOverlay!: Phaser.GameObjects.Rectangle;
   private weatherOverlay!: Phaser.GameObjects.Rectangle;
   private weatherDrops: Array<{ rect: Phaser.GameObjects.Rectangle; rx: number; ry: number; speed: number }> = [];
 
   private tool: InteractionTool = { mode: 'inspect_chop' };
+  private overlayMode: OverlayMode = 'none';
   private selectedTile: { gx: number; gy: number } | null = null;
   private ghostCoord: { gx: number; gy: number } | null = null;
   private frameCounter = 0;
@@ -157,6 +165,12 @@ export class WorldScene extends Phaser.Scene {
     if ((prevMode === 'land_unlock') !== (tool.mode === 'land_unlock')) {
       this.invalidateAllChunkTextures();
     }
+    this.forceEntitySync = true;
+  }
+
+  public setOverlayMode(mode: OverlayMode): void {
+    this.overlayMode = mode;
+    this.renderMapOverlay();
     this.forceEntitySync = true;
   }
 
@@ -318,6 +332,9 @@ export class WorldScene extends Phaser.Scene {
       this.starSprites.push({ img: st, rx, ry, phase: i * 0.9 });
     }
 
+    this.roadBakeGfx = this.make.graphics({ x: 0, y: 0 }, false);
+    this.overlayGraphics = this.add.graphics().setDepth(790000);
+
     this.selectedCursor = this.add
       .image(0, 0, ATLAS_KEY, 'tile_selected')
       .setOrigin(0.5, 0)
@@ -433,7 +450,11 @@ export class WorldScene extends Phaser.Scene {
       },
       onDragPaintTile: (gx, gy) => this.handlePaintTile(gx, gy),
       isPaintMode: () =>
-        this.tool.mode === 'road' || this.tool.mode === 'land_unlock' || this.tool.mode === 'demolish',
+        this.tool.mode === 'road' ||
+        this.tool.mode === 'land_unlock' ||
+        this.tool.mode === 'demolish' ||
+        this.tool.mode === 'place_utility' ||
+        this.tool.mode === 'remove_utility',
       onUserGestureAudioUnlock: () => this.audio.unlock(),
       onCameraMoved: (x, y, z) => {
         this.engine.dispatch({ type: 'SET_CAMERA', x, y, zoom: z });
@@ -480,9 +501,13 @@ export class WorldScene extends Phaser.Scene {
         this.audio.play('festival');
         const cam = this.cameras.main;
         this.vfx.spawnText(cam.scrollX + cam.width * 0.5, cam.scrollY + cam.height * 0.4, 'City Festival!', '#fde047');
-      } else if (ev.type === 'BUILDING_MOVED') {
+      } else if (ev.type === 'BUILDING_MOVED' || ev.type === 'BUILDING_PLACED') {
+        this.forceEntitySync = true;
+      } else if (ev.type === 'ROAD_PLACED') {
+        this.markRoadNeighborsDirty(ev.gx, ev.gy);
         this.forceEntitySync = true;
       } else if (ev.type === 'ROAD_REMOVED') {
+        this.markRoadNeighborsDirty(ev.gx, ev.gy);
         const { sx, sy } = gridToIso(ev.gx, ev.gy, 2);
         this.vfx.spawnChips(sx, sy, 0x94a3b8, 5);
         this.vfx.spawnText(
@@ -589,6 +614,40 @@ export class WorldScene extends Phaser.Scene {
       return;
     }
 
+    if (this.tool.mode === 'place_utility') {
+      const res = this.engine.dispatch({ type: 'PLACE_UTILITY', kind: this.tool.kind, gx, gy });
+      if (res.ok) {
+        this.audio.play('road');
+        const labelMap: Record<UtilityPlacementKind, string> = {
+          power_line: '+Power Line',
+          substation: '+Substation',
+          water_pipe: '+Water Pipe',
+          water_pump: '+Water Pump',
+        };
+        const color =
+          this.tool.kind === 'power_line' || this.tool.kind === 'substation' ? '#fde047' : '#38bdf8';
+        this.vfx.spawnText(sx, sy - 12, labelMap[this.tool.kind], color);
+        this.renderMapOverlay();
+      } else {
+        this.audio.play('error');
+        this.sceneCallbacks.onToolError(res.reason ?? 'Cannot install utility here');
+      }
+      return;
+    }
+
+    if (this.tool.mode === 'remove_utility') {
+      const res = this.engine.dispatch({ type: 'REMOVE_UTILITY', kind: this.tool.kind, gx, gy });
+      if (res.ok) {
+        this.audio.play('demolish');
+        this.vfx.spawnText(sx, sy - 12, 'Removed', '#fca5a5');
+        this.renderMapOverlay();
+      } else {
+        this.audio.play('error');
+        this.sceneCallbacks.onToolError(res.reason ?? 'No utility on this tile');
+      }
+      return;
+    }
+
     const info = this.engine.inspectTile(gx, gy);
     if (info.building) {
       this.audio.play('ui');
@@ -614,6 +673,27 @@ export class WorldScene extends Phaser.Scene {
       if (info.roadType !== RoadType.None) {
         const res = this.engine.dispatch({ type: 'REMOVE_ROAD', gx, gy });
         if (res.ok) this.audio.play('demolish');
+      }
+    } else if (this.tool.mode === 'place_utility') {
+      const res = this.engine.dispatch({ type: 'PLACE_UTILITY', kind: this.tool.kind, gx, gy });
+      if (res.ok) {
+        this.audio.play('road');
+        this.renderMapOverlay();
+      }
+    } else if (this.tool.mode === 'remove_utility') {
+      const res = this.engine.dispatch({ type: 'REMOVE_UTILITY', kind: this.tool.kind, gx, gy });
+      if (res.ok) {
+        this.audio.play('demolish');
+        this.renderMapOverlay();
+      }
+    }
+  }
+
+  private markRoadNeighborsDirty(gx: number, gy: number): void {
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const { cx, cy } = gridToChunk(gx + dx, gy + dy);
+        this.engine.chunks.markRenderDirty(cx, cy);
       }
     }
   }
@@ -902,6 +982,7 @@ export class WorldScene extends Phaser.Scene {
   private bakeChunkTexture(chunk: ChunkData, slot: ChunkRenderSlot): void {
     const rt = slot.rt;
     rt.clear();
+    this.roadBakeGfx.clear();
 
     const showFrontier = this.tool.mode === 'land_unlock';
 
@@ -947,11 +1028,91 @@ export class WorldScene extends Phaser.Scene {
         const road = chunk.roadType[idx] as RoadType;
         if (road !== RoadType.None) {
           rt.stamp(ATLAS_KEY, `road_${road}`, localX, localY, { originX: 0.5, originY: 0 });
+          this.drawMergedRoadConnectors(gx, gy, road, localX, localY + 16);
         }
       }
     }
 
+    rt.draw(this.roadBakeGfx, 0, 0);
     rt.render();
+  }
+
+  private drawMergedRoadConnectors(
+    gx: number,
+    gy: number,
+    road: RoadType,
+    cx: number,
+    cy: number
+  ): void {
+    const mask = this.engine.roadNet.getRoadBitmask(gx, gy, this.engine.chunks);
+    const gfx = this.roadBakeGfx;
+
+    const dirs: Array<[number, number, number]> = [
+      [1, 16, -8],  // N
+      [2, 16, 8],   // E
+      [4, -16, 8],  // S
+      [8, -16, -8], // W
+    ];
+
+    let baseColor = 0xa16207;
+    let baseWidth = 8;
+    let accentColor: number | null = null;
+    let accentWidth = 1.5;
+
+    if (road === RoadType.Gravel) {
+      baseColor = 0x78716c;
+      baseWidth = 9;
+      accentColor = 0xa8a29e;
+      accentWidth = 1.2;
+    } else if (road === RoadType.Stone) {
+      baseColor = 0x64748b;
+      baseWidth = 10;
+      accentColor = 0xcbd5e1;
+      accentWidth = 1.4;
+    } else if (road === RoadType.Paved) {
+      baseColor = 0x334155;
+      baseWidth = 11;
+      accentColor = 0xfacc15;
+      accentWidth = 1.5;
+    } else if (road === RoadType.Highway) {
+      baseColor = 0x1e293b;
+      baseWidth = 13;
+      accentColor = 0xfef08a;
+      accentWidth = 2;
+    } else if (road === RoadType.Bridge) {
+      baseColor = 0x92400e;
+      baseWidth = 11;
+      accentColor = 0xfef3c7;
+      accentWidth = 1.6;
+    } else if (road === RoadType.Rail) {
+      baseColor = 0x475569;
+      baseWidth = 7;
+      accentColor = 0xe2e8f0;
+      accentWidth = 2.4;
+    }
+
+    gfx.fillStyle(baseColor, 0.96);
+    gfx.fillCircle(cx, cy, baseWidth * 0.48);
+
+    gfx.lineStyle(baseWidth, baseColor, 0.96);
+    for (const [bit, dx, dy] of dirs) {
+      if ((mask & bit) !== 0) {
+        gfx.lineBetween(cx, cy, cx + dx, cy + dy);
+      }
+    }
+
+    if (accentColor !== null) {
+      gfx.lineStyle(accentWidth, accentColor, 0.88);
+      for (const [bit, dx, dy] of dirs) {
+        if ((mask & bit) !== 0) {
+          gfx.lineBetween(cx, cy, cx + dx, cy + dy);
+        }
+      }
+      if (mask === 0) {
+        gfx.fillStyle(accentColor, 0.75);
+        gfx.fillCircle(cx, cy, 1.8);
+      }
+    }
   }
 
   private syncDynamicEntities(): void {
@@ -1076,7 +1237,9 @@ export class WorldScene extends Phaser.Scene {
         b.status === 'no_workers' ||
         b.status === 'no_road' ||
         b.status === 'no_inputs' ||
-        b.status === 'no_power';
+        b.status === 'no_power' ||
+        b.status === 'no_water' ||
+        b.status === 'deposit_depleted';
 
       if (showMarker) {
         if (!marker) {
@@ -1100,7 +1263,11 @@ export class WorldScene extends Phaser.Scene {
                 ? 'NO ROAD'
                 : b.status === 'no_power'
                   ? 'NO POWER'
-                  : 'NO INPUT';
+                  : b.status === 'no_water'
+                    ? 'NO WATER'
+                    : b.status === 'deposit_depleted'
+                      ? 'DEPLETED'
+                      : 'NO INPUT';
         marker
           .setText(label)
           .setPosition(anchor.sx, anchor.sy - 20)
@@ -1117,6 +1284,182 @@ export class WorldScene extends Phaser.Scene {
         this.buildingSprites.delete(id);
         this.statusMarkers.get(id)?.destroy();
         this.statusMarkers.delete(id);
+      }
+    }
+
+    this.renderMapOverlay();
+  }
+
+  private renderMapOverlay(): void {
+    const gfx = this.overlayGraphics;
+    gfx.clear();
+    if (this.overlayMode === 'none') return;
+
+    const bounds = this.getVisibleGridBounds();
+    const ZONE_COLORS: Record<number, number> = {
+      [ZoneId.Residential]: 0x22c55e,
+      [ZoneId.Industrial]: 0xf59e0b,
+      [ZoneId.Commercial]: 0x3b82f6,
+      [ZoneId.Agricultural]: 0x84cc16,
+      [ZoneId.SEZ]: 0xa855f7,
+      [ZoneId.Government]: 0xeab308,
+    };
+    const DEP_COLORS: Record<number, number> = {
+      [DepositType.Stone]: 0x94a3b8,
+      [DepositType.Clay]: 0xd97706,
+      [DepositType.Sand]: 0xfde68a,
+      [DepositType.IronOre]: 0x60a5fa,
+      [DepositType.CopperOre]: 0xfb923c,
+      [DepositType.Coal]: 0xcbd5e1,
+      [DepositType.Silver]: 0xe2e8f0,
+      [DepositType.Gold]: 0xfacc15,
+    };
+
+    if (this.overlayMode === 'power' || this.overlayMode === 'water') {
+      const isPower = this.overlayMode === 'power';
+      const lineFlag = isPower ? UtilityFlag.PowerLine : UtilityFlag.WaterPipe;
+      const hubFlag = isPower ? UtilityFlag.PowerSubstation : UtilityFlag.WaterPump;
+      const netColor = isPower ? 0xfacc15 : 0x38bdf8;
+      const hubColor = isPower ? 0xfef08a : 0xbae6fd;
+
+      for (let gy = bounds.minGy; gy <= bounds.maxGy; gy++) {
+        for (let gx = bounds.minGx; gx <= bounds.maxGx; gx++) {
+          const { chunk, index } = this.engine.chunks.getTile(gx, gy);
+          const u = chunk.utilityNet[index];
+          if ((u & (lineFlag | hubFlag)) === 0) continue;
+
+          const elev = chunk.elevation[index];
+          const { sx, sy } = gridToIso(gx, gy, elev);
+          const cx = sx;
+          const cy = sy + 16;
+
+          gfx.lineStyle(2.2, netColor, 0.9);
+          for (const [dx, dy] of [
+            [1, 0],
+            [0, 1],
+          ] as const) {
+            const nb = this.engine.chunks.getTile(gx + dx, gy + dy);
+            if ((nb.chunk.utilityNet[nb.index] & (lineFlag | hubFlag)) !== 0) {
+              const nbIso = gridToIso(gx + dx, gy + dy, nb.chunk.elevation[nb.index]);
+              gfx.lineBetween(cx, cy, nbIso.sx, nbIso.sy + 16);
+            }
+          }
+
+          if ((u & hubFlag) !== 0) {
+            gfx.fillStyle(hubColor, 0.95);
+            gfx.fillCircle(cx, cy, 4.5);
+            gfx.lineStyle(1.5, netColor, 0.95);
+            gfx.strokeCircle(cx, cy, 8);
+          } else {
+            gfx.fillStyle(netColor, 0.9);
+            gfx.fillCircle(cx, cy, 2.8);
+          }
+        }
+      }
+
+      for (const b of this.engine.state.buildings) {
+        const def = BUILDINGS[b.defId];
+        if (!def) continue;
+        if (
+          b.gx + def.width < bounds.minGx ||
+          b.gx > bounds.maxGx ||
+          b.gy + def.height < bounds.minGy ||
+          b.gy > bounds.maxGy
+        ) {
+          continue;
+        }
+        const relevant = isPower
+          ? (def.powerDemand ?? 0) > 0 || (def.powerOutput ?? 0) > 0
+          : (def.waterDemand ?? 0) > 0 || (def.waterOutput ?? 0) > 0;
+        if (!relevant) continue;
+
+        const connected = isPower ? b.powerConnected : b.waterConnected;
+        const sat = (isPower ? b.powerSatisfaction : b.waterSatisfaction) ?? (connected ? 1 : 0);
+        const outlineColor = !connected ? 0xef4444 : sat < 0.99 ? 0xf59e0b : 0x22c55e;
+
+        const elev = this.getTileElev(b.gx, b.gy);
+        const top = gridToIso(b.gx, b.gy, elev);
+        const right = gridToIso(b.gx + def.width, b.gy, elev);
+        const bottom = gridToIso(b.gx + def.width, b.gy + def.height, elev);
+        const left = gridToIso(b.gx, b.gy + def.height, elev);
+
+        gfx.fillStyle(outlineColor, 0.18);
+        gfx.lineStyle(2, outlineColor, 0.92);
+        gfx.beginPath();
+        gfx.moveTo(top.sx, top.sy);
+        gfx.lineTo(right.sx, right.sy);
+        gfx.lineTo(bottom.sx, bottom.sy);
+        gfx.lineTo(left.sx, left.sy);
+        gfx.closePath();
+        gfx.fillPath();
+        gfx.strokePath();
+      }
+      return;
+    }
+
+    if (this.overlayMode === 'zones' || this.overlayMode === 'deposits') {
+      for (let gy = bounds.minGy; gy <= bounds.maxGy; gy++) {
+        for (let gx = bounds.minGx; gx <= bounds.maxGx; gx++) {
+          const { chunk, index } = this.engine.chunks.getTile(gx, gy);
+          const elev = chunk.elevation[index];
+          const { sx, sy } = gridToIso(gx, gy, elev);
+
+          if (this.overlayMode === 'zones') {
+            if ((chunk.flags[index] & TileFlag.Unlocked) === 0) continue;
+            const z = chunk.zoneType[index];
+            const color = ZONE_COLORS[z];
+            if (!color) continue;
+            gfx.fillStyle(color, 0.28);
+            gfx.lineStyle(1, color, 0.78);
+            gfx.beginPath();
+            gfx.moveTo(sx, sy);
+            gfx.lineTo(sx + 32, sy + 16);
+            gfx.lineTo(sx, sy + 32);
+            gfx.lineTo(sx - 32, sy + 16);
+            gfx.closePath();
+            gfx.fillPath();
+            gfx.strokePath();
+          } else {
+            const dep = chunk.depositType[index] as DepositType;
+            const unlocked = (chunk.flags[index] & TileFlag.Unlocked) !== 0;
+            const explored = (chunk.flags[index] & TileFlag.Explored) !== 0;
+            if ((!unlocked && !explored) || dep === DepositType.None || chunk.depositQty[index] <= 0) continue;
+            const color = DEP_COLORS[dep] ?? 0xfacc15;
+            gfx.fillStyle(color, 0.22);
+            gfx.lineStyle(2, color, 0.95);
+            gfx.beginPath();
+            gfx.moveTo(sx, sy + 2);
+            gfx.lineTo(sx + 28, sy + 16);
+            gfx.lineTo(sx, sy + 30);
+            gfx.lineTo(sx - 28, sy + 16);
+            gfx.closePath();
+            gfx.fillPath();
+            gfx.strokePath();
+          }
+        }
+      }
+      return;
+    }
+
+    if (this.overlayMode === 'paths') {
+      for (const a of this.engine.citizens.agents) {
+        if (!a.path || a.path.length === 0) continue;
+        const lineColor = a.carrying !== 'none' || a.task === 'chopping' ? 0xfbbf24 : 0x38bdf8;
+        gfx.lineStyle(1.8, lineColor, 0.85);
+        const startElev = this.getTileElev(Math.round(a.gx), Math.round(a.gy));
+        const startIso = gridToIso(a.gx, a.gy, startElev);
+        gfx.beginPath();
+        gfx.moveTo(startIso.sx, startIso.sy + 16);
+        const tgtElev = this.getTileElev(Math.round(a.targetGx), Math.round(a.targetGy));
+        const tgtIso = gridToIso(a.targetGx, a.targetGy, tgtElev);
+        gfx.lineTo(tgtIso.sx, tgtIso.sy + 16);
+        for (let i = 0; i < a.path.length; i++) {
+          const wp = a.path[i];
+          const wpElev = this.getTileElev(wp.gx, wp.gy);
+          const wpIso = gridToIso(wp.gx, wp.gy, wpElev);
+          gfx.lineTo(wpIso.sx, wpIso.sy + 16);
+        }
+        gfx.strokePath();
       }
     }
   }

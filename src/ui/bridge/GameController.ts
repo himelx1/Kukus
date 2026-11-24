@@ -1,13 +1,13 @@
 import { useEffect, useState } from 'react';
 import { CoreEngine } from '../../core/CoreEngine';
-import type { GameCommand } from '../../core/CommandTypes';
+import type { CommandResult, GameCommand } from '../../core/CommandTypes';
 import type { NotificationItem, TileInspection, WorldEngineState } from '../../core/GameState';
 import { BUILDINGS } from '../../data/buildings.data';
 import { getBuildQueueCap, QuestDef } from '../../data/levels.data';
 import { DEPOSIT_NAMES, DepositType } from '../../data/trees.data';
 import { AudioSystem } from '../../engine/AudioSystem';
 import { PhaserHost } from '../../engine/PhaserHost';
-import type { InteractionTool } from '../../engine/WorldScene';
+import type { InteractionTool, OverlayMode } from '../../engine/WorldScene';
 import { OfflineManager, OfflineStatus } from '../../persistence/OfflineManager';
 import { PerfMetrics, PerfMonitor } from '../../persistence/PerfMonitor';
 import { SaveManager, SaveSlotId, SaveSlotSummary } from '../../persistence/SaveManager';
@@ -23,8 +23,7 @@ export type ActiveSheet =
   | 'economy'
   | 'tech'
   | 'achievements'
-  | 'quests'
-  | 'changelog';
+  | 'quests';
 
 export type ActiveModal = 'none' | 'pause' | 'settings' | 'saves';
 
@@ -50,11 +49,13 @@ export interface GameSnapshot {
   perf: PerfMetrics;
   offline: OfflineStatus;
   tool: InteractionTool;
+  overlayMode: OverlayMode;
   selectedTile: TileInspection | null;
   selectedBuildingId: number | null;
   ghostInfo: GhostInfoState | null;
   activeSheet: ActiveSheet;
   activeModal: ActiveModal;
+  simInspectorOpen: boolean;
   toastError: string | null;
 }
 
@@ -66,11 +67,13 @@ class GameControllerImpl {
   private phaserHost: PhaserHost | null = null;
 
   private tool: InteractionTool = { mode: 'inspect_chop' };
+  private overlayMode: OverlayMode = 'none';
   private selectedTileCoords: { gx: number; gy: number } | null = null;
   private selectedBuildingId: number | null = null;
   private ghostInfo: GhostInfoState | null = null;
   private activeSheet: ActiveSheet = 'none';
   private activeModal: ActiveModal = 'none';
+  private simInspectorOpen = false;
   private toastError: string | null = null;
   private toastTimer: number | null = null;
 
@@ -135,6 +138,8 @@ class GameControllerImpl {
       },
     });
 
+    this.phaserHost.worldScene.setOverlayMode(this.overlayMode);
+
     this.engine.subscribe(() => {
       this.snapshotDirty = true;
     });
@@ -181,13 +186,16 @@ class GameControllerImpl {
     void this.saveManager.saveGame(this.engine, 'autosave');
   };
 
-  public dispatch(cmd: GameCommand): boolean {
+  public dispatchResult(cmd: GameCommand): CommandResult {
     this.audio.unlock();
     const res = this.engine.dispatch(cmd);
-    if (!res.ok && res.reason) {
+    if (!res.ok && res.reason && !res.needsConfirm) {
       this.showErrorToast(res.reason);
       this.audio.play('error');
-    } else if (res.ok && (cmd.type === 'UNLOCK_TILE' || cmd.type === 'UNLOCK_BATCH_FRONTIER')) {
+    } else if (
+      res.ok &&
+      (cmd.type === 'UNLOCK_TILE' || cmd.type === 'UNLOCK_BATCH_FRONTIER' || cmd.type === 'UNLOCK_CHUNK')
+    ) {
       this.audio.play('unlock');
     } else if (res.ok && cmd.type === 'DEMOLISH_BUILDING' && this.selectedBuildingId === cmd.buildingId) {
       this.selectedBuildingId = null;
@@ -195,13 +203,28 @@ class GameControllerImpl {
       this.audio.play('demolish');
     } else if (res.ok && cmd.type === 'RUSH_CONSTRUCTION') {
       this.audio.play('build');
-    } else if (res.ok && cmd.type === 'BUY_MISSING_FOR_BUILDING') {
+    } else if (res.ok && (cmd.type === 'BUY_MISSING_FOR_BUILDING' || cmd.type === 'RECRUIT_WORKERS')) {
       this.audio.play('coin');
     } else if (res.ok && cmd.type === 'CLEAR_AREA_OBSTACLES') {
       this.audio.play('tree_clear');
+    } else if (res.ok && cmd.type === 'TERRAFORM_TILE') {
+      this.phaserHost?.worldScene.invalidateAllChunkTextures();
+      this.audio.play('build');
     }
     this.notifyImmediate();
-    return res.ok;
+    return res;
+  }
+
+  public dispatch(cmd: GameCommand): boolean {
+    return this.dispatchResult(cmd).ok;
+  }
+
+  public setOverlayMode(mode: OverlayMode): void {
+    this.audio.unlock();
+    this.audio.play('ui');
+    this.overlayMode = mode;
+    this.phaserHost?.worldScene.setOverlayMode(mode);
+    this.notifyImmediate();
   }
 
   public setTool(tool: InteractionTool): void {
@@ -335,6 +358,13 @@ class GameControllerImpl {
     this.notifyImmediate();
   }
 
+  public setSimInspectorOpen(open: boolean): void {
+    this.audio.unlock();
+    this.audio.play('ui');
+    this.simInspectorOpen = open;
+    this.notifyImmediate();
+  }
+
   public clearSelection(): void {
     this.selectedBuildingId = null;
     this.selectedTileCoords = null;
@@ -357,8 +387,18 @@ class GameControllerImpl {
     return res.ok;
   }
 
-  public async loadFromSlot(slotId: SaveSlotId): Promise<{ ok: boolean; recoveredFromBackup?: boolean; error?: string }> {
+  public async loadFromSlot(slotId: SaveSlotId): Promise<{ ok: boolean; recoveredFromBackup?: boolean; migrated?: boolean; error?: string }> {
     const res = await this.saveManager.loadGame(this.engine, slotId);
+    if (res.ok) {
+      this.phaserHost?.worldScene.invalidateAllChunkTextures();
+      this.centerCamera();
+    }
+    this.notifyImmediate();
+    return res;
+  }
+
+  public async restorePreMigrationBackup(slotId: SaveSlotId): Promise<{ ok: boolean; error?: string }> {
+    const res = await this.saveManager.restorePreMigrationBackup(this.engine, slotId);
     if (res.ok) {
       this.phaserHost?.worldScene.invalidateAllChunkTextures();
       this.centerCamera();
@@ -401,6 +441,7 @@ class GameControllerImpl {
       perf: this.perf.getMetrics(),
       offline: { ...OfflineManager.status },
       tool: this.tool,
+      overlayMode: this.overlayMode,
       selectedTile: this.selectedTileCoords
         ? this.engine.inspectTile(this.selectedTileCoords.gx, this.selectedTileCoords.gy)
         : null,
@@ -408,6 +449,7 @@ class GameControllerImpl {
       ghostInfo: this.ghostInfo,
       activeSheet: this.activeSheet,
       activeModal: this.activeModal,
+      simInspectorOpen: this.simInspectorOpen,
       toastError: this.toastError,
     };
   }

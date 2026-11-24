@@ -1,11 +1,12 @@
-import { BUILDING_LIST, BUILDINGS } from '../data/buildings.data';
+import { BUILDING_LIST, BuildingCategory, BuildingDef, BUILDINGS, getBuildingFootprint } from '../data/buildings.data';
+import type { ZoneType } from '../core/GameState';
 import { getBuildQueueCap } from '../data/levels.data';
 import { RESOURCES, ResourceId } from '../data/resources.data';
 import { ROADS, RoadType } from '../data/roads.data';
 import { TECH_MAP } from '../data/techTree.data';
 import { DEPOSIT_NAMES, DepositType, FeatureType } from '../data/trees.data';
 import type { ChunkManager } from '../core/ChunkManager';
-import type { BuildingInstance, WorldEngineState } from '../core/GameState';
+import { BuildingInstance, WorldEngineState, ZONE_ID_TO_TYPE } from '../core/GameState';
 import { gridToChunk } from '../core/IsoMath';
 import { ResourceSystem } from './ResourceSystem';
 import type { RoadNetworkSystem } from './RoadNetworkSystem';
@@ -53,18 +54,42 @@ export interface PlacementValidation {
 }
 
 const NATURAL_SOURCES: Partial<Record<ResourceId, string[]>> = {
-  wood: ['Chop Trees', 'Woodcutter Camp', 'Forester Hut'],
-  stone: ['Chop Stone Boulders', 'Stone Quarry'],
+  wood: ['Chop Trees', 'Wood Factory', 'Forester Hut'],
+  stone: ['Chop Stone Boulders', 'Stone Factory'],
   herbs: ['Chop Jungle Trees', 'Gatherer Hut', 'Spice Garden'],
   berries: ['Chop Fruit Trees', 'Gatherer Hut'],
   bamboo: ['Chop Wild Bamboo', 'Bamboo Grove'],
   clay: ['Clay Pit (on Clay Bed)'],
-  sand: ['Sand Quarry (on Sand Bank)'],
+  sand: ['Sand Factory (on Sand Bank)'],
   iron_ore: ['Iron Mine (on Iron Vein)'],
   copper_ore: ['Copper Mine (on Copper Vein)'],
-  coal: ['Coal Mine (on Coal Deposit)'],
-  gold_ore: ['Gold Mine (on Gold Vein)'],
+  coal: ['Coal Factory (on Coal Deposit)'],
+  gold_ore: ['Gold Factory (on Gold Vein)'],
+  silver_ore: ['Silver Factory (on Silver Vein)'],
+  silver: ['Silver Refinery'],
 };
+
+const DEFAULT_ALLOWED_ZONES_BY_CATEGORY: Record<BuildingCategory, ZoneType[]> = {
+  residential: ['residential', 'sez'],
+  production: ['industrial', 'agricultural', 'sez'],
+  agricultural: ['agricultural', 'sez'],
+  industrial: ['industrial', 'sez'],
+  commercial: ['commercial', 'residential', 'sez'],
+  storage: ['industrial', 'agricultural', 'commercial', 'sez'],
+  educational: ['residential', 'commercial', 'government', 'sez'],
+  healthcare: ['residential', 'commercial', 'government', 'sez'],
+  government: ['government', 'commercial', 'residential', 'sez'],
+  recreational: ['residential', 'commercial', 'government', 'sez'],
+  transportation: ['residential', 'commercial', 'industrial', 'agricultural', 'government', 'sez'],
+  energy: ['industrial', 'commercial', 'residential', 'agricultural', 'government', 'sez'],
+  environmental: ['residential', 'commercial', 'industrial', 'agricultural', 'government', 'sez'],
+};
+
+function getAllowedZonesForDef(def: BuildingDef): ZoneType[] {
+  return def.allowedZones && def.allowedZones.length > 0
+    ? def.allowedZones
+    : DEFAULT_ALLOWED_ZONES_BY_CATEGORY[def.category];
+}
 
 export class BuildingSystem {
   private static producerCache: Partial<Record<ResourceId, string[]>> | null = null;
@@ -246,10 +271,21 @@ export class BuildingSystem {
     gx: number,
     gy: number,
     state: WorldEngineState,
-    chunks: ChunkManager
+    chunks: ChunkManager,
+    rotation: 0 | 1 = 0
   ): PlacementValidation {
     const def = BUILDINGS[defId];
     if (!def) return { valid: false, reason: 'Unknown building' };
+
+    if (def.maxPerWorld !== undefined) {
+      const existingCount = state.buildings.filter((b) => b.defId === defId).length;
+      if (existingCount >= def.maxPerWorld) {
+        return {
+          valid: false,
+          reason: `Only ${def.maxPerWorld} ${def.name} allowed in the world`,
+        };
+      }
+    }
 
     const req = BuildingSystem.getGlobalBuildRequirements(defId, state);
     if (!req.levelOk) {
@@ -266,13 +302,14 @@ export class BuildingSystem {
       };
     }
 
-    // Tile / footprint checks first alongside cost check so player gets full clarity
+    const fp = getBuildingFootprint(def, rotation);
     let hasDeposit = false;
     let touchesWater = false;
     const blockingObstacles: Array<{ gx: number; gy: number }> = [];
+    const anchorCityId = chunks.getTileCityId(gx, gy);
 
-    for (let dx = 0; dx < def.width; dx++) {
-      for (let dy = 0; dy < def.height; dy++) {
+    for (let dx = 0; dx < fp.width; dx++) {
+      for (let dy = 0; dy < fp.height; dy++) {
         const tx = gx + dx;
         const ty = gy + dy;
         if (!chunks.isUnlocked(tx, ty)) {
@@ -281,6 +318,26 @@ export class BuildingSystem {
             missingCoins: req.missingCoins,
             missingMaterials: req.missingMaterials,
             reason: `Tile (${tx}, ${ty}) is locked wilderness — unlock frontier land first`,
+          };
+        }
+        const tileCityId = chunks.getTileCityId(tx, ty);
+        if (anchorCityId > 0 && tileCityId > 0 && tileCityId !== anchorCityId) {
+          return {
+            valid: false,
+            missingCoins: req.missingCoins,
+            missingMaterials: req.missingMaterials,
+            reason: `Footprint (${tx}, ${ty}) crosses a city border — keep buildings inside one city`,
+          };
+        }
+        const zoneId = chunks.getTileZone(tx, ty);
+        const zoneType = ZONE_ID_TO_TYPE[zoneId] ?? 'none';
+        const allowedZones = getAllowedZonesForDef(def);
+        if (zoneType !== 'none' && !allowedZones.includes(zoneType)) {
+          return {
+            valid: false,
+            missingCoins: req.missingCoins,
+            missingMaterials: req.missingMaterials,
+            reason: `${def.name} is not permitted in a ${zoneType.toUpperCase()} zone`,
           };
         }
         const { chunk, index } = chunks.getTile(tx, ty);
@@ -312,7 +369,7 @@ export class BuildingSystem {
         if (chunk.featureType[index] !== FeatureType.None) {
           blockingObstacles.push({ gx: tx, gy: ty });
         }
-        if (def.requiredDeposit && chunk.depositType[index] === def.requiredDeposit) {
+        if (def.requiredDeposit && chunk.depositType[index] === def.requiredDeposit && chunk.depositQty[index] > 0) {
           hasDeposit = true;
         }
       }
@@ -334,14 +391,14 @@ export class BuildingSystem {
         requiresDeposit: def.requiredDeposit,
         missingCoins: req.missingCoins,
         missingMaterials: req.missingMaterials,
-        reason: `No ${req.requiredDepositName ?? 'mineral deposit'} under footprint — place over a sparkling vein`,
+        reason: `No active ${req.requiredDepositName ?? 'mineral deposit'} under footprint — place over a sparkling vein`,
       };
     }
 
     if (def.requiresCoast) {
-      outer: for (let dx = -1; dx <= def.width; dx++) {
-        for (let dy = -1; dy <= def.height; dy++) {
-          if (dx >= 0 && dx < def.width && dy >= 0 && dy < def.height) continue;
+      outer: for (let dx = -1; dx <= fp.width; dx++) {
+        for (let dy = -1; dy <= fp.height; dy++) {
+          if (dx >= 0 && dx < fp.width && dy >= 0 && dy < fp.height) continue;
           const { chunk, index } = chunks.getTile(gx + dx, gy + dy);
           if (chunks.isWaterBiome(chunk.biomeId[index])) {
             touchesWater = true;
@@ -378,9 +435,10 @@ export class BuildingSystem {
     gy: number,
     state: WorldEngineState,
     chunks: ChunkManager,
-    roadNet: RoadNetworkSystem
+    roadNet: RoadNetworkSystem,
+    rotation: 0 | 1 = 0
   ): { ok: boolean; reason?: string; building?: BuildingInstance } {
-    const check = this.validateBuildingPlacement(defId, gx, gy, state, chunks);
+    const check = this.validateBuildingPlacement(defId, gx, gy, state, chunks, rotation);
     if (!check.valid) return { ok: false, reason: check.reason };
 
     const def = BUILDINGS[defId];
@@ -389,13 +447,18 @@ export class BuildingSystem {
       return { ok: false, reason: req.summaryReason ?? 'Insufficient Coins or materials' };
     }
 
+    const fp = getBuildingFootprint(def, rotation);
+    const blueprintLevel = Math.min(def.maxLevel, Math.max(1, state.unlockedBuildingLevels?.[defId] ?? 1));
+    const ownerCityId = chunks.getTileCityId(gx, gy) || state.activeCityId || 1;
     const id = state.nextBuildingId++;
     const building: BuildingInstance = {
       id,
       defId,
       gx,
       gy,
-      level: 1,
+      rotation,
+      cityId: ownerCityId,
+      level: blueprintLevel,
       status: 'constructing',
       buildProgress: 0,
       prodProgress: 0,
@@ -405,8 +468,8 @@ export class BuildingSystem {
       connectedRoadCluster: 0,
     };
 
-    for (let dx = 0; dx < def.width; dx++) {
-      for (let dy = 0; dy < def.height; dy++) {
+    for (let dx = 0; dx < fp.width; dx++) {
+      for (let dy = 0; dy < fp.height; dy++) {
         const { cx, cy, index } = gridToChunk(gx + dx, gy + dy);
         const chunk = chunks.getOrCreateChunk(cx, cy);
         chunk.buildingRef[index] = id;
@@ -559,6 +622,8 @@ export class BuildingSystem {
     }
 
     b.level += 1;
+    state.unlockedBuildingLevels ??= {};
+    state.unlockedBuildingLevels[b.defId] = Math.max(state.unlockedBuildingLevels[b.defId] ?? 1, b.level);
     ResourceSystem.recalculateCapacities(state);
     return { ok: true, xpGained: 40 * b.level };
   }
@@ -578,16 +643,28 @@ export class BuildingSystem {
     const def = BUILDINGS[b.defId];
     if (!def) return { valid: false, reason: 'Unknown building' };
 
+    const fp = getBuildingFootprint(def, b.rotation ?? 0);
     let hasDeposit = false;
     let touchesWater = false;
     const blockingObstacles: Array<{ gx: number; gy: number }> = [];
+    const anchorCityId = chunks.getTileCityId(newGx, newGy);
 
-    for (let dx = 0; dx < def.width; dx++) {
-      for (let dy = 0; dy < def.height; dy++) {
+    for (let dx = 0; dx < fp.width; dx++) {
+      for (let dy = 0; dy < fp.height; dy++) {
         const tx = newGx + dx;
         const ty = newGy + dy;
         if (!chunks.isUnlocked(tx, ty)) {
           return { valid: false, reason: `Tile (${tx}, ${ty}) must be unlocked first` };
+        }
+        const tileCityId = chunks.getTileCityId(tx, ty);
+        if (anchorCityId > 0 && tileCityId > 0 && tileCityId !== anchorCityId) {
+          return { valid: false, reason: `Cannot move across a city border at (${tx}, ${ty})` };
+        }
+        const zoneId = chunks.getTileZone(tx, ty);
+        const zoneType = ZONE_ID_TO_TYPE[zoneId] ?? 'none';
+        const allowedZones = getAllowedZonesForDef(def);
+        if (zoneType !== 'none' && !allowedZones.includes(zoneType)) {
+          return { valid: false, reason: `${def.name} cannot sit in a ${zoneType.toUpperCase()} zone` };
         }
         const { chunk, index } = chunks.getTile(tx, ty);
         const biome = chunk.biomeId[index];
@@ -603,7 +680,7 @@ export class BuildingSystem {
         if (chunk.featureType[index] !== FeatureType.None) {
           blockingObstacles.push({ gx: tx, gy: ty });
         }
-        if (def.requiredDeposit && chunk.depositType[index] === def.requiredDeposit) {
+        if (def.requiredDeposit && chunk.depositType[index] === def.requiredDeposit && chunk.depositQty[index] > 0) {
           hasDeposit = true;
         }
       }
@@ -619,13 +696,13 @@ export class BuildingSystem {
 
     if (def.requiredDeposit && !hasDeposit) {
       const dName = def.requiredDeposit ? DEPOSIT_NAMES[def.requiredDeposit] : 'mineral deposit';
-      return { valid: false, reason: `Must remain over a ${dName}` };
+      return { valid: false, reason: `Must remain over an active ${dName}` };
     }
 
     if (def.requiresCoast) {
-      outer: for (let dx = -1; dx <= def.width; dx++) {
-        for (let dy = -1; dy <= def.height; dy++) {
-          if (dx >= 0 && dx < def.width && dy >= 0 && dy < def.height) continue;
+      outer: for (let dx = -1; dx <= fp.width; dx++) {
+        for (let dy = -1; dy <= fp.height; dy++) {
+          if (dx >= 0 && dx < fp.width && dy >= 0 && dy < fp.height) continue;
           const { chunk, index } = chunks.getTile(newGx + dx, newGy + dy);
           if (chunks.isWaterBiome(chunk.biomeId[index])) {
             touchesWater = true;
@@ -657,8 +734,9 @@ export class BuildingSystem {
     const def = BUILDINGS[b.defId];
     if (!def) return { ok: false, reason: 'Invalid definition' };
 
-    for (let dx = 0; dx < def.width; dx++) {
-      for (let dy = 0; dy < def.height; dy++) {
+    const fp = getBuildingFootprint(def, b.rotation ?? 0);
+    for (let dx = 0; dx < fp.width; dx++) {
+      for (let dy = 0; dy < fp.height; dy++) {
         const { cx, cy, index } = gridToChunk(b.gx + dx, b.gy + dy);
         const chunk = chunks.getOrCreateChunk(cx, cy);
         if (chunk.buildingRef[index] === b.id) {
@@ -670,9 +748,10 @@ export class BuildingSystem {
 
     b.gx = newGx;
     b.gy = newGy;
+    b.cityId = chunks.getTileCityId(newGx, newGy) || b.cityId || state.activeCityId || 1;
 
-    for (let dx = 0; dx < def.width; dx++) {
-      for (let dy = 0; dy < def.height; dy++) {
+    for (let dx = 0; dx < fp.width; dx++) {
+      for (let dy = 0; dy < fp.height; dy++) {
         const { cx, cy, index } = gridToChunk(newGx + dx, newGy + dy);
         const chunk = chunks.getOrCreateChunk(cx, cy);
         chunk.buildingRef[index] = b.id;
@@ -726,8 +805,9 @@ export class BuildingSystem {
     const def = BUILDINGS[b.defId];
 
     if (def) {
-      for (let dx = 0; dx < def.width; dx++) {
-        for (let dy = 0; dy < def.height; dy++) {
+      const fp = getBuildingFootprint(def, b.rotation ?? 0);
+      for (let dx = 0; dx < fp.width; dx++) {
+        for (let dy = 0; dy < fp.height; dy++) {
           const { cx, cy, index } = gridToChunk(b.gx + dx, b.gy + dy);
           const chunk = chunks.getOrCreateChunk(cx, cy);
           if (chunk.buildingRef[index] === b.id) {
